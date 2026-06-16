@@ -1,0 +1,20 @@
+# PlatformIO build output and caches
+.pio/
+.pioenvs/
+.piolibdeps/
+.pio.nvmrc
+
+# IDE
+.vscode/
+!.vscode/extensions.json
+.idea/
+
+# Build artifacts
+*.bin
+*.elf
+*.map
+*.hex
+
+# OS junk
+.DS_Store
+Thumbs.db
