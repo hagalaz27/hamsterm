@@ -25,23 +25,28 @@ Type `help` on the device for the full list.
 M5Stack Cardputer - ESP32-S3 (Wi-Fi + BLE), ~512 KB SRAM (no PSRAM), 8 MB flash,
 240x135 display, 56-key keyboard, microSD, IR LED, mic and speaker.
 
-## Build & flash (PlatformIO)
+## Install
+
+Flash it straight from your browser - no toolchain, no command line:
+
+### → [hamsterm.com](https://hamsterm.com/)
+
+Connect the Cardputer over USB-C, open the site in Chrome or Edge, and click flash.
+That's it - the device reboots into hamsTerm when it's done.
+
+<details>
+<summary>Building from source (for contributors)</summary>
+
+With [PlatformIO](https://platformio.org/):
+
 ```bash
 pio run -t upload      # build and flash over USB-C
 pio device monitor     # open the serial monitor
 ```
+
 The build environment is `m5stack-cardputer`; artifacts land in
 `.pio/build/m5stack-cardputer/`.
-
-To produce a single image for a browser-based installer (ESP Web Tools):
-```bash
-esptool --chip esp32s3 merge_bin -o hamsterm.bin \
-  --flash_mode dio --flash_freq 80m --flash_size 8MB \
-  0x0     .pio/build/m5stack-cardputer/bootloader.bin \
-  0x8000  .pio/build/m5stack-cardputer/partitions.bin \
-  0xe000  ~/.platformio/packages/framework-arduinoespressif32/tools/partitions/boot_app0.bin \
-  0x10000 .pio/build/m5stack-cardputer/firmware.bin
-```
+</details>
 
 ## Project layout
 ```
