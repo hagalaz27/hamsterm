@@ -14,6 +14,7 @@
 #include "SystemCmds.h"
 #include "Editor.h"
 #include "Telnet.h"
+#include "Ssh.h"
 #include "Helpers.h"
 
 class Terminal {
@@ -46,6 +47,13 @@ private:
     // --- Telnet ---
     TelnetSession* telnet = nullptr;
     bool telnetActive = false;
+
+    // --- SSH ---
+    SshSession* ssh = nullptr;
+    bool sshActive = false;
+    bool sshWaitingForPass = false;
+    std::string sshUser, sshHost;
+    uint16_t sshPort = 22;
 
     // --- User variables (expand as $NAME / ${NAME}) ---
     std::map<std::string, std::string> vars;
@@ -316,6 +324,81 @@ public:
         if (telnetActive) telnet_teardown();
     }
 
+    // --- SSH ---
+    bool ssh_active() const { return sshActive; }
+    bool ssh_waiting_pass() const { return sshWaitingForPass; }
+
+    // Parse "ssh [user@]host [port]" (or "ssh host -l user [port]") and, if a
+    // user/host are known, prompt for the password. Returns having printed the
+    // prompt or an error.
+    void start_ssh(const std::string& argstr) {
+        auto toks = split_ws(argstr);
+        std::string user, host;
+        uint16_t port = 22;
+        std::vector<std::string> positional;
+        for (size_t i = 0; i < toks.size(); ++i) {
+            if (toks[i] == "-l" && i + 1 < toks.size()) { user = toks[++i]; }
+            else if (toks[i] == "-p" && i + 1 < toks.size()) {
+                long v; if (parse_uint(toks[++i], v) && v >= 1 && v <= 65535) port = (uint16_t)v;
+            } else positional.push_back(toks[i]);
+        }
+        if (positional.empty()) { print("Usage: ssh [user@]host [port]\n"); M5Cardputer.Display.print(prompt.c_str()); return; }
+
+        std::string target = positional[0];
+        size_t at = target.find('@');
+        if (at != std::string::npos) { user = target.substr(0, at); host = target.substr(at + 1); }
+        else host = target;
+        // optional bare port as second positional
+        if (positional.size() >= 2) { long v; if (parse_uint(positional[1], v) && v >= 1 && v <= 65535) port = (uint16_t)v; }
+
+        if (host.empty()) { print("ssh: no host\n"); M5Cardputer.Display.print(prompt.c_str()); return; }
+        if (user.empty()) { print("ssh: no user (use user@host or -l user)\n"); M5Cardputer.Display.print(prompt.c_str()); return; }
+        if (WiFi.status() != WL_CONNECTED) { print("Not connected to WiFi\n"); M5Cardputer.Display.print(prompt.c_str()); return; }
+
+        sshUser = user; sshHost = host; sshPort = port;
+        sshWaitingForPass = true;
+        print("Password: ");
+    }
+
+    // Called with the typed password to perform the (blocking) connection.
+    void ssh_connect_with_pass(const std::string& password) {
+        sshWaitingForPass = false;
+        print("\nConnecting to " + sshHost + "...\n");
+        ssh = new SshSession();
+        if (!ssh->begin(sshHost, sshUser, password, sshPort)) {
+            print(ssh->error() + std::string("\n"));
+            delete ssh; ssh = nullptr;
+            M5Cardputer.Display.print(prompt.c_str());
+            return;
+        }
+        sshActive = true;
+        ssh->onConnected(sshUser, sshHost);
+    }
+
+    void ssh_teardown() {
+        if (ssh) { ssh->close(); delete ssh; ssh = nullptr; }
+        sshActive = false;
+        M5Cardputer.Display.setFont(&fonts::efontCN_14);
+        M5Cardputer.Display.setTextColor(WHITE);
+        M5Cardputer.Display.setTextSize(1);
+        add_to_history("[ssh disconnected]");
+        scroll_offset = 0;
+        refresh_screen();
+    }
+
+    void ssh_poll() {
+        if (!sshActive || !ssh) return;
+        if (!ssh->poll()) ssh_teardown();
+    }
+    void ssh_on_char(uint8_t c)   { if (sshActive && ssh) ssh->onChar(c); }
+    void ssh_on_enter()           { if (sshActive && ssh) ssh->onEnter(); }
+    void ssh_on_backspace()       { if (sshActive && ssh) ssh->onBackspace(); }
+    void ssh_on_ctrl(uint8_t b)   { if (sshActive && ssh) ssh->onCtrl(b); }
+    void ssh_arrow(const char* s) { if (sshActive && ssh) ssh->sendStr(s); }
+    void ssh_scroll_up()          { if (sshActive && ssh) ssh->scrollUp(); }
+    void ssh_scroll_down()        { if (sshActive && ssh) ssh->scrollDown(); }
+    void ssh_disconnect()         { if (sshActive) ssh_teardown(); }
+
     void handle_keypress(uint8_t key) {
         // Any normal key resets the tab-completion state
         commandNumber = -1;
@@ -566,6 +649,12 @@ public:
             return;
         }
 
+        if (sshWaitingForPass) {
+            // The entered line is the SSH password (consumed, not run/stored).
+            ssh_connect_with_pass(cmd);
+            return; // ssh_connect_with_pass prints the prompt on failure
+        }
+
         // Record the command in history (no consecutive duplicates).
         // Passwords (handled above) never reach here.
         if (cmdHistory.empty() || cmdHistory.back() != cmd) {
@@ -774,6 +863,11 @@ public:
                 }
                 size_t cap = redirectTarget.empty() ? 500 : 0; // screen = capped, file = everything
                 CommonCmds::find(start, pattern, cap, emit);
+            }
+            else if (cmd.rfind("ssh ", 0) == 0) {
+                // ssh [user@]host [port]   (password auth, prompts for password)
+                start_ssh(cmd.substr(4));
+                return; // prompt/handoff managed inside start_ssh
             }
             else if (cmd.rfind("telnet ", 0) == 0) {
                 // telnet <host> [port]   (default port 23)

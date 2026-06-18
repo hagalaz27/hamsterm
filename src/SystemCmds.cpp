@@ -37,6 +37,7 @@ void SystemCmds::help(LineCallback emit) {
     emit("       ping <host> [n]\n");
     emit("       telnet <host> [port]\n");
     emit("       nc <host> <port>\n");
+    emit("       ssh [user@]host [port]\n");
     emit("Sys:   help sysinfo free battery\n");
     emit("Vars:  set [NAME val] | NAME=val\n");
     emit("       unset NAME | $NAME expands\n");

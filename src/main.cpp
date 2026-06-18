@@ -3,6 +3,14 @@
 #include "CommonCmds.h"
 #include "Version.h"
 
+// libssh (LibSSH-ESP32) one-time init helper.
+#include "libssh_esp32.h"
+
+// The SSH key exchange needs a deep stack, far more than the default 8 KB loop
+// task. Raise the loop task stack so the ssh command (which runs in loop) has
+// room. Costs ~50 KB of DRAM for the whole runtime (visible in `free`).
+SET_LOOP_TASK_STACK_SIZE(51200);
+
 Terminal* terminal;
 
 void setup() {
@@ -32,11 +40,45 @@ void setup() {
     delay(2000);
 
     CommonCmds::begin();
+    libssh_begin(); // initialize LibSSH-ESP32 once
     terminal = new Terminal();
 }
 
 void loop() {
     M5Cardputer.update();
+
+    // ===== SSH mode: pump the channel every iteration + route input =====
+    if (terminal->ssh_active()) {
+        terminal->ssh_poll();
+
+        if (terminal->ssh_active() &&
+            M5Cardputer.Keyboard.isChange() && M5Cardputer.Keyboard.isPressed()) {
+            auto& kb = M5Cardputer.Keyboard;
+            Keyboard_Class::KeysState status = kb.keysState();
+
+            if (status.ctrl) {
+                for (auto c : status.word) {
+                    char lc = (c >= 'A' && c <= 'Z') ? (c + 32) : c;
+                    if (lc == 'q') { terminal->ssh_disconnect(); return; }
+                    if (lc >= 'a' && lc <= 'z') { terminal->ssh_on_ctrl((uint8_t)(lc - 'a' + 1)); return; }
+                }
+            }
+            if (kb.isKeyPressed(KEY_FN)) {
+                if (kb.isKeyPressed(';')) { terminal->ssh_arrow("\x1b[A"); return; } // up    -> server
+                if (kb.isKeyPressed('.')) { terminal->ssh_arrow("\x1b[B"); return; } // down  -> server
+                if (kb.isKeyPressed(',')) { terminal->ssh_scroll_up();   return; }   // left  -> scroll
+                if (kb.isKeyPressed('/')) { terminal->ssh_scroll_down(); return; }   // right -> scroll
+                return;
+            }
+            if (status.del)        terminal->ssh_on_backspace();
+            else if (status.enter) terminal->ssh_on_enter();
+            else if (!status.word.empty()) {
+                for (auto c : status.word) terminal->ssh_on_char((uint8_t)c);
+            }
+        }
+        delay(5);
+        return;
+    }
 
     // ===== Telnet mode: poll the socket every iteration + feed session input =====
     if (terminal->telnet_active()) {
