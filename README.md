@@ -2,7 +2,7 @@
 
 A Linux-like terminal firmware for the **M5Stack Cardputer** (ESP32-S3). It gives
 the handheld a real shell: a filesystem on internal flash and microSD, Wi-Fi and
-network tools, a full-screen text editor, an interactive telnet/nc client,
+network tools, a full-screen text editor, interactive telnet/nc and SSH clients,
 shell-style globbing, and user variables - all driven from the device keyboard.
 
 ## Features
@@ -14,8 +14,9 @@ shell-style globbing, and user variables - all driven from the device keyboard.
 - **Pipes & redirection:** `>`, `>>`, `| grep`
 - **Storage:** mount/unmount microSD at `/sd`, `df`
 - **Wi-Fi & network:** scan, connect, `ping`, local network + port scan
-- **telnet / nc:** interactive client with line editing, `[c]`/`[s]` labels,
-  ANSI handling and screen scrollback
+- **telnet / nc:** interactive client with local line editing, ANSI handling
+  and screen scrollback
+- **SSH:** password-based SSH client (LibSSH-ESP32) for a remote shell
 - **Editor:** `edit` / `ed` - full-screen editor with cursor keys and Ctrl shortcuts
 - **System:** `help`, `sysinfo`, `free`, `df`, `battery`
 

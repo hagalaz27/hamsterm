@@ -283,7 +283,7 @@ public:
             return;
         }
         print("Connecting to " + host + ":" + std::to_string(port) + "...\n");
-        telnet = new TelnetSession(raw, /*labels=*/!raw); // labels [c]/[s] for telnet, not for nc
+        telnet = new TelnetSession(raw); // raw = nc (no telnet negotiation)
         if (!telnet->begin(host, port)) {
             print("telnet: connection failed\n");
             delete telnet;

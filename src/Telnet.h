@@ -13,8 +13,8 @@
 // Scroll keys come from main.cpp: left = up, right = down.
 class TelnetSession {
 public:
-    TelnetSession(bool rawMode, bool showLabels)
-        : raw(rawMode), labels(showLabels) {}
+    explicit TelnetSession(bool rawMode)
+        : raw(rawMode) {}
 
     bool begin(const std::string& host, uint16_t port) {
         if (!client.connect(host.c_str(), port, 5000)) return false;
@@ -102,7 +102,7 @@ public:
 
 private:
     WiFiClient client;
-    bool raw, labels;
+    bool raw;
     bool remoteEcho = false;
     bool lineMode() const { return !remoteEcho; }
 
@@ -120,7 +120,7 @@ private:
     static const int VISIBLE_ROWS = 9, VISIBLE_COLS = 34;
     static const size_t MAX_LINES = 200, MAX_LINE_LEN = 512;
     static const uint16_t COL_BG = 0x0000, COL_TEXT = 0xFFFF;
-    static const uint16_t COL_SERVER = 0x07FF, COL_CLIENT = 0x07E0, COL_BAR = 0xFB60;
+    static const uint16_t COL_BAR = 0xFB60;
 
     bool live() const { return scrollOffset == 0; }
 
@@ -131,9 +131,12 @@ private:
     }
 
     void putCh(char c) {
+        // Soft-wrap the scrollback at the screen width, matching the hardware
+        // wrap of live output, so a scrolled long line looks exactly like it
+        // did live (instead of being truncated to one row).
+        if (curLine.size() >= (size_t)VISIBLE_COLS) pushLine();
         curLine += c;
         if (live()) M5Cardputer.Display.print(c);
-        if (curLine.size() >= MAX_LINE_LEN) pushLine();
     }
     void putStr(const char* s) { for (const char* p = s; *p; ++p) putCh(*p); }
 
@@ -143,18 +146,11 @@ private:
     }
     void newlineIfNeeded() { if (!curLine.empty()) newLine(); }
 
-    void putLabel(const char* lbl, uint16_t color) {
-        curLine += lbl;
-        if (live()) {
-            M5Cardputer.Display.setTextColor(color);
-            M5Cardputer.Display.print(lbl);
-            M5Cardputer.Display.setTextColor(COL_TEXT);
-        }
-    }
+    // Start of a client (locally-edited) line: just make sure we are on a
+    // fresh screen line, so input and server output don't run together.
     void ensureClientLabel() {
         if (clientLabelShown) return;
-        if (labels) { newlineIfNeeded(); putLabel("[c] ", COL_CLIENT); }
-        else newlineIfNeeded();
+        newlineIfNeeded();
         clientLabelShown = true;
     }
     void eraseChar() {
@@ -166,55 +162,57 @@ private:
         }
     }
 
-    // ---- scrollback rendering ----
-    int totalRows() const { return (int)outLines.size() + (curLine.empty() ? 0 : 1); }
-    int maxScroll() const { int m = totalRows() - VISIBLE_ROWS; return m > 0 ? m : 0; }
-
-    const std::string& rowAt(int idx) const {
-        if (idx < (int)outLines.size()) return outLines[idx];
-        return curLine;
+    // ---- scrollback rendering (wraps long lines, same as live output) ----
+    int physRowsOf(const std::string& s) const {
+        if (s.empty()) return 1;
+        return (int)((s.size() + VISIBLE_COLS - 1) / VISIBLE_COLS);
     }
-    void drawRow(const std::string& line) {
+    int totalPhys() const {
+        int t = 0;
+        for (const auto& l : outLines) t += physRowsOf(l);
+        if (!curLine.empty()) t += physRowsOf(curLine);
+        return t;
+    }
+    int maxScroll() const { int m = totalPhys() - VISIBLE_ROWS; return m > 0 ? m : 0; }
+
+    // Draw VISIBLE_ROWS physical (wrapped) rows ending 'offset' rows from the
+    // bottom. Each logical line is split into VISIBLE_COLS-wide segments, so a
+    // long line shows in full across several rows - exactly like live output.
+    // When liveTail is set, the last segment of curLine gets no trailing
+    // newline so live (hardware-scrolled) printing continues from there.
+    void renderWindow(int offset, bool liveTail) {
         auto& d = M5Cardputer.Display;
-        std::string s = line.substr(0, VISIBLE_COLS);
-        if (s.rfind("[s] ", 0) == 0) {
-            d.setTextColor(COL_SERVER); d.print("[s] "); d.setTextColor(COL_TEXT); d.print(s.substr(4).c_str());
-        } else if (s.rfind("[c] ", 0) == 0) {
-            d.setTextColor(COL_CLIENT); d.print("[c] "); d.setTextColor(COL_TEXT); d.print(s.substr(4).c_str());
-        } else {
-            d.print(s.c_str());
+        d.setTextScroll(false);
+        d.fillScreen(COL_BG);
+        d.setCursor(0, 0);
+
+        int total = totalPhys();
+        int start = total - VISIBLE_ROWS - offset;
+        if (start < 0) start = 0;
+
+        int logicalCount = (int)outLines.size() + (curLine.empty() ? 0 : 1);
+        int phys = 0, drawn = 0;
+        for (int li = 0; li < logicalCount && drawn < VISIBLE_ROWS; ++li) {
+            const std::string& L = (li < (int)outLines.size()) ? outLines[li] : curLine;
+            int rows = physRowsOf(L);
+            for (int seg = 0; seg < rows && drawn < VISIBLE_ROWS; ++seg) {
+                if (phys >= start) {
+                    d.print(L.substr((size_t)seg * VISIBLE_COLS, VISIBLE_COLS).c_str());
+                    bool lastSeg = (li == logicalCount - 1) && (seg == rows - 1);
+                    if (!(liveTail && lastSeg && !curLine.empty())) d.println();
+                    drawn++;
+                }
+                phys++;
+            }
         }
     }
     void renderScroll() {
-        auto& d = M5Cardputer.Display;
-        d.setTextScroll(false);
-        d.fillScreen(COL_BG);
-        d.setCursor(0, 0);
-        int total = totalRows();
-        int start = total - VISIBLE_ROWS - scrollOffset;
-        if (start < 0) start = 0;
-        for (int r = 0; r < VISIBLE_ROWS; r++) {
-            int idx = start + r;
-            if (idx >= total) break;
-            drawRow(rowAt(idx));
-            d.println();
-        }
-        // 'scrolled' indicator - an orange bar at the bottom
-        d.fillRect(0, 132, 240, 3, COL_BAR);
+        renderWindow(scrollOffset, false);
+        M5Cardputer.Display.fillRect(0, 132, 240, 3, COL_BAR); // 'scrolled' indicator
     }
     void renderLive() {
-        auto& d = M5Cardputer.Display;
-        d.setTextScroll(false);
-        d.fillScreen(COL_BG);
-        d.setCursor(0, 0);
-        int total = (int)outLines.size();
-        bool hasCur = !curLine.empty();
-        int completed = VISIBLE_ROWS - (hasCur ? 1 : 0);
-        if (completed > total) completed = total;
-        int start = total - completed;
-        for (int i = start; i < total; i++) { drawRow(outLines[i]); d.println(); }
-        if (hasCur) drawRow(curLine); // no newline - leave the cursor at the end
-        d.setTextScroll(true);        // resume live (hardware) scrolling
+        renderWindow(0, true);
+        M5Cardputer.Display.setTextScroll(true); // resume live (hardware) scrolling
     }
     void goLive() { if (scrollOffset != 0) { scrollOffset = 0; renderLive(); } }
 
@@ -257,9 +255,9 @@ private:
         if (b == 27) { ansiState = 1; return; }
         if (b == '\n') { newLine(); serverLineStart = true; return; }
         if (b == '\r') return;
+        if (b == 8 || b == 0x7f) { eraseChar(); return; } // server's destructive backspace (echoing/char-mode servers)
         if (serverLineStart) {
-            if (labels) { newlineIfNeeded(); putLabel("[s] ", COL_SERVER); }
-            else newlineIfNeeded();
+            newlineIfNeeded();
             serverLineStart = false;
         }
         if (b == '\t') putStr("  ");

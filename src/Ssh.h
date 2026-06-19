@@ -149,7 +149,7 @@ private:
         if (outLines.size() > MAX_LINES) outLines.erase(outLines.begin());
         curLine.clear();
     }
-    void putCh(char c) { curLine += c; if (live()) M5Cardputer.Display.print(c); if (curLine.size() >= MAX_LINE_LEN) pushLine(); }
+    void putCh(char c) { if (curLine.size() >= (size_t)VISIBLE_COLS) pushLine(); curLine += c; if (live()) M5Cardputer.Display.print(c); }
     void putStr(const char* s) { for (const char* p = s; *p; ++p) putCh(*p); }
     void newLine() { pushLine(); if (live()) M5Cardputer.Display.println(); }
 
@@ -173,32 +173,51 @@ private:
         else if (b >= 32 && b <= 126) putCh((char)b);
     }
 
-    int totalRows() const { return (int)outLines.size() + (curLine.empty() ? 0 : 1); }
-    int maxScroll() const { int m = totalRows() - VISIBLE_ROWS; return m > 0 ? m : 0; }
-    const std::string& rowAt(int idx) const { return idx < (int)outLines.size() ? outLines[idx] : curLine; }
+    int physRowsOf(const std::string& s) const {
+        if (s.empty()) return 1;
+        return (int)((s.size() + VISIBLE_COLS - 1) / VISIBLE_COLS);
+    }
+    int totalPhys() const {
+        int t = 0;
+        for (const auto& l : outLines) t += physRowsOf(l);
+        if (!curLine.empty()) t += physRowsOf(curLine);
+        return t;
+    }
+    int maxScroll() const { int m = totalPhys() - VISIBLE_ROWS; return m > 0 ? m : 0; }
 
-    void renderScroll() {
+    // Draw VISIBLE_ROWS physical (wrapped) rows ending 'offset' rows from the
+    // bottom, splitting each logical line into VISIBLE_COLS-wide segments so
+    // long lines show in full - same as live output.
+    void renderWindow(int offset, bool liveTail) {
         auto& d = M5Cardputer.Display;
         d.setTextScroll(false); d.fillScreen(COL_BG); d.setCursor(0, 0);
-        int total = totalRows();
-        int start = total - VISIBLE_ROWS - scrollOffset; if (start < 0) start = 0;
-        for (int r = 0; r < VISIBLE_ROWS; r++) {
-            int idx = start + r; if (idx >= total) break;
-            d.print(rowAt(idx).substr(0, VISIBLE_COLS).c_str()); d.println();
+
+        int total = totalPhys();
+        int start = total - VISIBLE_ROWS - offset; if (start < 0) start = 0;
+
+        int logicalCount = (int)outLines.size() + (curLine.empty() ? 0 : 1);
+        int phys = 0, drawn = 0;
+        for (int li = 0; li < logicalCount && drawn < VISIBLE_ROWS; ++li) {
+            const std::string& L = (li < (int)outLines.size()) ? outLines[li] : curLine;
+            int rows = physRowsOf(L);
+            for (int seg = 0; seg < rows && drawn < VISIBLE_ROWS; ++seg) {
+                if (phys >= start) {
+                    d.print(L.substr((size_t)seg * VISIBLE_COLS, VISIBLE_COLS).c_str());
+                    bool lastSeg = (li == logicalCount - 1) && (seg == rows - 1);
+                    if (!(liveTail && lastSeg && !curLine.empty())) d.println();
+                    drawn++;
+                }
+                phys++;
+            }
         }
-        d.fillRect(0, 132, 240, 3, COL_BAR);
+    }
+    void renderScroll() {
+        renderWindow(scrollOffset, false);
+        M5Cardputer.Display.fillRect(0, 132, 240, 3, COL_BAR);
     }
     void renderLive() {
-        auto& d = M5Cardputer.Display;
-        d.setTextScroll(false); d.fillScreen(COL_BG); d.setCursor(0, 0);
-        int total = (int)outLines.size();
-        bool hasCur = !curLine.empty();
-        int completed = VISIBLE_ROWS - (hasCur ? 1 : 0);
-        if (completed > total) completed = total;
-        int start = total - completed;
-        for (int i = start; i < total; i++) { d.print(outLines[i].substr(0, VISIBLE_COLS).c_str()); d.println(); }
-        if (hasCur) d.print(curLine.substr(0, VISIBLE_COLS).c_str());
-        d.setTextScroll(true);
+        renderWindow(0, true);
+        M5Cardputer.Display.setTextScroll(true);
     }
     void goLive() { if (scrollOffset != 0) { scrollOffset = 0; renderLive(); } }
 };
