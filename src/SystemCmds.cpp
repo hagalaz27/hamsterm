@@ -33,6 +33,8 @@ void SystemCmds::help(LineCallback emit) {
     emit("Disk:  mount umount df\n");
     emit("WiFi:  wf s | wf c <ssid> [-p pw]\n");
     emit("       wf dc\n");
+    emit("AP:    ap -s <ssid> [-p pw] start\n");
+    emit("       ap stop | ap status\n");
     emit("Net:   net s | net s p <ip> <ports>\n");
     emit("       ping <host> [n]\n");
     emit("       telnet <host> [port]\n");

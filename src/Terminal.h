@@ -1038,6 +1038,25 @@ public:
             else if (cmd == "wf dc") {
                 WiFiCmds::wifi_disconnect(emit);
             }
+            else if (cmd == "ap" || cmd.rfind("ap ", 0) == 0) {
+                // ap -s <ssid> [-p <pw>] start | ap stop | ap status
+                auto toks = split_ws(cmd.size() > 2 ? cmd.substr(2) : "");
+                std::string ssid, pass, action;
+                bool haveS = false;
+                for (size_t i = 0; i < toks.size(); ++i) {
+                    if (toks[i] == "-s" && i + 1 < toks.size()) { ssid = toks[++i]; haveS = true; }
+                    else if (toks[i] == "-p" && i + 1 < toks.size()) { pass = toks[++i]; }
+                    else if (toks[i] == "start" || toks[i] == "stop" || toks[i] == "status") action = toks[i];
+                }
+                if (action == "stop") WiFiCmds::ap_stop(emit);
+                else if (action == "status" || (action.empty() && !haveS)) WiFiCmds::ap_status(emit);
+                else if (action == "start") {
+                    if (!haveS) emit("Usage: ap -s <ssid> [-p <password>] start\n");
+                    else WiFiCmds::ap_start(ssid, pass, emit);
+                } else {
+                    emit("Usage: ap -s <ssid> [-p <password>] start | ap stop | ap status\n");
+                }
+            }
             else if (cmd == "net s") {
                 NetworkCmds::net_scan(emit);
             }

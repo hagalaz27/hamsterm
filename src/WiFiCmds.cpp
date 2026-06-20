@@ -1,6 +1,10 @@
 #include "WiFiCmds.h"
 #include "Helpers.h"
 
+// For the SoftAP connected-client list (ap status).
+#include "esp_wifi.h"
+#include "esp_netif.h"
+
 bool WiFiCmds::waitingForPass = false;
 std::string WiFiCmds::pendingSSID = "";
 
@@ -138,5 +142,91 @@ void WiFiCmds::wifi_disconnect(LineCallback emit) {
         emit("Disconnected.\n"); // FIX: typo "Disconected"
     } else {
         emit("Not connected to WiFi.\n");
+    }
+}
+
+// ---- SoftAP (access point) ----
+
+void WiFiCmds::ap_start(const std::string& ssid, const std::string& password, LineCallback emit) {
+    if (ssid.empty() || ssid.size() > 32) {
+        emit("ap: SSID must be 1-32 chars\n");
+        return;
+    }
+    bool open = password.empty();
+    if (!open && (password.size() < 8 || password.size() > 63)) {
+        emit("ap: password must be 8-63 chars (omit -p for an open AP)\n");
+        return;
+    }
+    bool sta = (WiFi.status() == WL_CONNECTED);
+
+    // AP+STA when keeping a station link (must use the station channel).
+    WiFi.mode(sta ? WIFI_AP_STA : WIFI_AP);
+    int chan = sta ? WiFi.channel() : 1;
+    bool ok = open ? WiFi.softAP(ssid.c_str(), NULL, chan)
+                   : WiFi.softAP(ssid.c_str(), password.c_str(), chan);
+    if (!ok) {
+        emit("ap: failed to start\n");
+        return;
+    }
+
+    char buf[160];
+    snprintf(buf, sizeof(buf), "AP \"%s\" up (%s, ch %d)\n",
+             ssid.c_str(), open ? "open" : "WPA2", chan);
+    emit(buf);
+    snprintf(buf, sizeof(buf), "IP: %s\n", WiFi.softAPIP().toString().c_str());
+    emit(buf);
+}
+
+void WiFiCmds::ap_stop(LineCallback emit) {
+    wifi_mode_t m = WiFi.getMode();
+    if (m != WIFI_AP && m != WIFI_AP_STA) {
+        emit("AP is not running.\n");
+        return;
+    }
+    WiFi.softAPdisconnect(true);   // stop AP and free its resources
+    WiFi.mode(WIFI_STA);           // back to station-only
+    emit("AP stopped.\n");
+}
+
+void WiFiCmds::ap_status(LineCallback emit) {
+    wifi_mode_t m = WiFi.getMode();
+    if (m != WIFI_AP && m != WIFI_AP_STA) {
+        emit("AP: off\n");
+        return;
+    }
+    char buf[160];
+    int n = WiFi.softAPgetStationNum();
+    snprintf(buf, sizeof(buf), "AP: on  IP %s  clients %d\n\n",
+             WiFi.softAPIP().toString().c_str(), n);
+    emit(buf);
+    if (n == 0) { emit("No clients connected.\n"); return; }
+
+    // Per-client details (IP + MAC from the netif lease list; Host + Vendor
+    // resolved like 'net s'). Vendor lookups hit an online API, so this is slow.
+    wifi_sta_list_t staList;
+    esp_netif_sta_list_t netList;
+    if (esp_wifi_ap_get_sta_list(&staList) != ESP_OK ||
+        esp_netif_get_sta_list(&staList, &netList) != ESP_OK) {
+        emit("(could not read client list)\n");
+        return;
+    }
+    for (int i = 0; i < netList.num; i++) {
+        esp_netif_sta_info_t& s = netList.sta[i];
+        char macStr[18];
+        snprintf(macStr, sizeof(macStr), "%02X-%02X-%02X-%02X-%02X-%02X",
+                 s.mac[0], s.mac[1], s.mac[2], s.mac[3], s.mac[4], s.mac[5]);
+        IPAddress ip(s.ip.addr);
+
+        std::string host = Helpers::getHostname(ip);
+        if (host == "") host = Helpers::getMDNSHostname(ip);
+        if (host == "") host = Helpers::getSSDPInfo(ip);
+        if (host == "") host = "Unknown Device";
+        std::string vendor = Helpers::getVendorFromAPI(String(macStr));
+
+        snprintf(buf, sizeof(buf), "Host: %s\n", host.c_str());   emit(buf);
+        snprintf(buf, sizeof(buf), "IP: %s\n", ip.toString().c_str()); emit(buf);
+        snprintf(buf, sizeof(buf), "MAC: %s\n", macStr);          emit(buf);
+        snprintf(buf, sizeof(buf), "Vendor: %s\n\n", vendor.c_str()); emit(buf);
+        delay(1200); // rate-limit requests to api.macvendors.com
     }
 }

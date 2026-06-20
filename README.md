@@ -14,6 +14,7 @@ shell-style globbing, and user variables - all driven from the device keyboard.
 - **Pipes & redirection:** `>`, `>>`, `| grep`
 - **Storage:** mount/unmount microSD at `/sd`, `df`
 - **Wi-Fi & network:** scan, connect, `ping`, local network + port scan
+- **Access point:** host a Wi-Fi AP with `ap -s ssid [-p pass] start` (open or WPA2)
 - **telnet / nc:** interactive client with local line editing, ANSI handling
   and screen scrollback
 - **SSH:** password-based SSH client (LibSSH-ESP32) for a remote shell

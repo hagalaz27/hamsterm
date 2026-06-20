@@ -17,4 +17,9 @@ public:
     static void wifi_connect(std::string ssid, LineCallback emit);
     static void wifi_connect_with_pass(std::string password, LineCallback emit);
     static void wifi_disconnect(LineCallback emit);
+
+    // SoftAP (access point) mode.
+    static void ap_start(const std::string& ssid, const std::string& password, LineCallback emit);
+    static void ap_stop(LineCallback emit);
+    static void ap_status(LineCallback emit);
 };
