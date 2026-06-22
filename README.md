@@ -14,12 +14,13 @@ shell-style globbing, and user variables - all driven from the device keyboard.
 - **Pipes & redirection:** `>`, `>>`, `| grep`
 - **Storage:** mount/unmount microSD at `/sd`, `df`
 - **Wi-Fi & network:** scan, connect, `ping`, local network + port scan
+- **Downloads:** `wget <url> [-o path]` - fetch a file over HTTP/HTTPS (streamed to flash or `/sd`)
 - **Access point:** host a Wi-Fi AP with `ap -s ssid [-p pass] start` (open or WPA2)
 - **telnet / nc:** interactive client with local line editing, ANSI handling
   and screen scrollback
 - **SSH:** password-based SSH client (LibSSH-ESP32) for a remote shell
 - **Editor:** `edit` / `ed` - full-screen editor with cursor keys and Ctrl shortcuts
-- **System:** `help`, `sysinfo`, `free`, `df`, `battery`
+- **System:** `help`, `sysinfo`, `free`, `df`, `battery`, `reboot`
 
 Type `help` on the device for the full list.
 

@@ -199,3 +199,138 @@ void NetworkCmds::ping(const std::string& target, uint8_t count, LineCallback em
         emit(buf);
     }
 }
+
+// ---- wget : download a URL to a file (streamed, never buffered in RAM) ----
+
+std::string NetworkCmds::filename_from_url(const std::string& url) {
+    std::string s = url;
+    size_t scheme = s.find("://");
+    if (scheme != std::string::npos) s = s.substr(scheme + 3);
+    size_t q = s.find('?'); if (q != std::string::npos) s = s.substr(0, q);
+    size_t h = s.find('#'); if (h != std::string::npos) s = s.substr(0, h);
+    size_t slash = s.find_last_of('/');
+    std::string name = (slash == std::string::npos) ? std::string("") : s.substr(slash + 1);
+    if (name.empty()) name = "index.html";
+    return name;
+}
+
+void NetworkCmds::wget(const std::string& args, LineCallback emit) {
+    // tokenize on whitespace
+    std::vector<std::string> toks;
+    {
+        size_t i = 0;
+        while (i < args.size()) {
+            while (i < args.size() && args[i] == ' ') i++;
+            size_t j = i;
+            while (j < args.size() && args[j] != ' ') j++;
+            if (j > i) toks.push_back(args.substr(i, j - i));
+            i = j;
+        }
+    }
+    std::string url, outPath;
+    for (size_t i = 0; i < toks.size(); ++i) {
+        if (toks[i] == "-o" && i + 1 < toks.size()) outPath = toks[++i];
+        else if (url.empty() && toks[i][0] != '-') url = toks[i];
+    }
+    if (url.empty()) { emit("Usage: wget <url> [-o <path>]\n"); return; }
+    if (WiFi.status() != WL_CONNECTED) { emit("Not connected to WiFi\n"); return; }
+
+    bool https = (url.rfind("https://", 0) == 0);
+    if (!https && url.rfind("http://", 0) != 0) {
+        emit("wget: URL must start with http:// or https://\n");
+        return;
+    }
+
+    std::string fname = outPath.empty() ? filename_from_url(url) : outPath;
+    std::string abs = Helpers::make_absolute(fname);
+
+    HTTPClient http;
+    WiFiClientSecure sclient;
+    WiFiClient pclient;
+    bool ok;
+    if (https) { sclient.setInsecure(); ok = http.begin(sclient, url.c_str()); } // no cert check
+    else { ok = http.begin(pclient, url.c_str()); }
+    if (!ok) { emit("wget: could not start request (bad URL?)\n"); return; }
+
+    http.setUserAgent("hamsTerm/1.0");
+    http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
+    http.setTimeout(15000);
+
+    int code = http.GET();
+    if (code != HTTP_CODE_OK) {
+        char b[64];
+        snprintf(b, sizeof(b), "wget: HTTP %d\n", code);
+        emit(b);
+        http.end();
+        return;
+    }
+
+    File f = Helpers::fsOpen(abs, "w");
+    if (!f) { emit("wget: cannot open output file\n"); http.end(); return; }
+
+    int total = http.getSize(); // >=0 if Content-Length known, -1 if chunked/unknown
+    {
+        char b[96];
+        if (total > 0) snprintf(b, sizeof(b), "Downloading %d bytes -> %s\n", total, fname.c_str());
+        else           snprintf(b, sizeof(b), "Downloading -> %s\n", fname.c_str());
+        emit(b);
+    }
+
+    int written = 0;
+    bool failed = false;
+
+    if (total >= 0) {
+        // Content-Length known: the raw stream is exactly the body (no chunk
+        // framing), so copy it ourselves. Crucially, the SD card can accept fewer
+        // bytes than asked mid-transfer (a "short write"); we retry the remainder
+        // instead of giving up. writeToStream() does not do this and aborts with
+        // error -10 (HTTPC_ERROR_STREAM_WRITE) on bigger files. No display output
+        // happens inside this loop (that would contend with SD on the SPI bus).
+        WiFiClient* stream = http.getStreamPtr();
+        uint8_t buf[2048];
+        int remaining = total;
+        uint32_t lastData = millis();
+        while (remaining > 0) {
+            size_t avail = stream->available();
+            if (avail) {
+                int toRead = (int)((avail > sizeof(buf)) ? sizeof(buf) : avail);
+                if (toRead > remaining) toRead = remaining;
+                int n = stream->readBytes(buf, toRead);
+                int off = 0, stuck = 0;
+                while (off < n) {
+                    size_t w = f.write(buf + off, (size_t)(n - off));
+                    off += (int)w;
+                    if (w == 0) { if (++stuck > 200) break; delay(2); } // let the card catch up
+                    else stuck = 0;
+                }
+                if (off < n) { failed = true; break; } // SD write truly stuck
+                written += n;
+                remaining -= n;
+                lastData = millis();
+            } else {
+                if (!http.connected()) { failed = true; break; }    // connection dropped early
+                if (millis() - lastData > 20000) { failed = true; break; } // stalled
+                delay(1);
+            }
+        }
+    } else {
+        // Unknown length (chunked / close-delimited): writeToStream decodes chunked.
+        written = http.writeToStream(&f);
+        if (written < 0) failed = true;
+    }
+
+    f.close();
+    http.end();
+
+    if (failed) {
+        char b[80];
+        snprintf(b, sizeof(b), "wget: write failed after %d bytes (SD/network)\n",
+                 written < 0 ? 0 : written);
+        emit(b);
+        Helpers::fsRemove(abs); // drop the partial file
+        return;
+    }
+    char b[96];
+    snprintf(b, sizeof(b), "Saved %s (%d bytes)\n", fname.c_str(), written);
+    emit(b);
+}

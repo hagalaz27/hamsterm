@@ -37,10 +37,12 @@ void SystemCmds::help(LineCallback emit) {
     emit("       ap stop | ap status\n");
     emit("Net:   net s | net s p <ip> <ports>\n");
     emit("       ping <host> [n]\n");
+    emit("       wget <url> [-o path]\n");
     emit("       telnet <host> [port]\n");
     emit("       nc <host> <port>\n");
     emit("       ssh [user@]host [port]\n");
     emit("Sys:   help sysinfo free battery\n");
+    emit("       reboot\n");
     emit("Vars:  set [NAME val] | NAME=val\n");
     emit("       unset NAME | $NAME expands\n");
     emit("Pipe:  cmd > f | cmd >> f\n");

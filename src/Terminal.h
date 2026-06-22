@@ -782,7 +782,8 @@ public:
         // its file arguments remain. A pattern that matches nothing is left
         // literal, exactly like a typical shell.
         if (cmd.find_first_of("*?") != std::string::npos &&
-            cmd != "find" && cmd.rfind("find ", 0) != 0) {
+            cmd != "find" && cmd.rfind("find ", 0) != 0 &&
+            cmd.rfind("wget ", 0) != 0) {
             cmd = CommonCmds::expand_globs(cmd);
         }
 
@@ -1059,6 +1060,17 @@ public:
             }
             else if (cmd == "net s") {
                 NetworkCmds::net_scan(emit);
+            }
+            else if (cmd.rfind("wget ", 0) == 0) {
+                NetworkCmds::wget(cmd.substr(5), emit);
+            }
+            else if (cmd == "wget") {
+                emit("Usage: wget <url> [-o <path>]\n");
+            }
+            else if (cmd == "reboot") {
+                emit("Rebooting...\n");
+                delay(300);
+                ESP.restart();
             }
             else if (cmd.rfind("ping ", 0) == 0) {
                 // ping <host|ip|url> [count]
