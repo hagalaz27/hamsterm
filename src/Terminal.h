@@ -68,6 +68,35 @@ public:
         M5Cardputer.Display.setFont(&fonts::efontCN_14);
         M5Cardputer.Display.setTextSize(1);
         M5Cardputer.Display.print(prompt.c_str());
+        run_profile(); // auto-run commands from /.profile, if present
+    }
+
+    // Run commands from /.profile (internal filesystem) at startup, one per
+    // line, exactly as if each were typed at the prompt. Lines that are empty
+    // or begin with '#' are skipped. Handy for setting variables, cd-ing to a
+    // working dir, or connecting to Wi-Fi on boot.
+    void run_profile() {
+        File f = Helpers::fsOpen("/.profile", "r");
+        if (!f) return;
+
+        std::string line;
+        auto runLine = [this](std::string ln) {
+            Helpers::trim(ln);
+            if (ln.empty() || ln[0] == '#') return; // skip blanks and comments
+            M5Cardputer.Display.print(ln.c_str());  // echo as if typed
+            M5Cardputer.Display.println();
+            command = ln;
+            execute_command();
+        };
+
+        while (f.available()) {
+            int c = f.read();
+            if (c < 0) break;
+            if (c == '\n') { runLine(line); line.clear(); }
+            else if (c != '\r' && line.size() < 512) { line += (char)c; }
+        }
+        if (!line.empty()) runLine(line); // last line without a trailing newline
+        f.close();
     }
 
     void add_to_history(const std::string& text) {
@@ -187,6 +216,10 @@ public:
             commandNumber = (commandNumber + 1) % (int)tabMatches.size();
         }
 
+        // Length of the input currently on screen (with the previous candidate),
+        // captured BEFORE we modify it - needed to clear exactly those rows.
+        int oldLen = (int)(prompt.length() + command.length());
+
         // Erase what was inserted last time (previousValue),
         // keeping the user-typed prefix.
         if (!previousValue.empty() &&
@@ -199,11 +232,41 @@ public:
         std::string suffix = match.substr(tabPrefix.size());
         previousValue = suffix;
 
-        // Redraw the whole command line (more reliable than manual geometry)
-        int y = M5Cardputer.Display.getCursorY();
-        M5Cardputer.Display.fillRect(0, y, M5Cardputer.Display.width(), 14, BLACK);
-        M5Cardputer.Display.setCursor(0, y);
+        // Repaint only the input rows in place (no full-screen clear) so that
+        // cycling candidates with Tab doesn't flicker. Wrap-aware.
         command += suffix;
+        redraw_input_inplace(oldLen);
+    }
+
+    // Redraw "prompt + command" in place, clearing exactly the display rows the
+    // input occupies - no full-screen fill, so it doesn't flicker. oldLen is the
+    // prompt+command length that was on screen before the change (so we clear
+    // the old rows too when the new input is shorter). Assumes the cursor is at
+    // the end of the currently displayed input.
+    void redraw_input_inplace(int oldLen) {
+        const int lineH = 14;
+        int cpr = M5Cardputer.Display.width() / 7; // chars per row (~34)
+        if (cpr < 1) cpr = 1;
+
+        int endY   = M5Cardputer.Display.getCursorY();
+        int startY = endY - (oldLen / cpr) * lineH; // first row of the input
+        if (startY < 0) startY = 0;
+
+        int newLen  = (int)(prompt.length() + command.length());
+        int oldRows = (oldLen + cpr - 1) / cpr; if (oldRows < 1) oldRows = 1;
+        int newRows = (newLen + cpr - 1) / cpr; if (newRows < 1) newRows = 1;
+
+        // If the new input would run past the bottom of the screen it scrolls,
+        // and in-place geometry no longer holds - fall back to a full repaint.
+        if (startY + newRows * lineH > M5Cardputer.Display.height()) {
+            refresh_screen();
+            return;
+        }
+
+        int rows = (oldRows > newRows) ? oldRows : newRows;
+
+        M5Cardputer.Display.fillRect(0, startY, M5Cardputer.Display.width(), rows * lineH, BLACK);
+        M5Cardputer.Display.setCursor(0, startY);
         M5Cardputer.Display.print(prompt.c_str());
         M5Cardputer.Display.print(command.c_str());
     }
@@ -434,9 +497,17 @@ public:
                 command.pop_back();
                 historyIndex = (int)cmdHistory.size(); // editing detaches from history
                 int x = M5Cardputer.Display.getCursorX();
-                int y = M5Cardputer.Display.getCursorY();
-                M5Cardputer.Display.fillRect(x - 7, y, 7, 14, BLACK);
-                M5Cardputer.Display.setCursor(x - 7, y);
+                if (x >= 7) {
+                    // Fast path: erase one char on the current row.
+                    int y = M5Cardputer.Display.getCursorY();
+                    M5Cardputer.Display.fillRect(x - 7, y, 7, 14, BLACK);
+                    M5Cardputer.Display.setCursor(x - 7, y);
+                } else {
+                    // At the left edge: the char being removed sits on the row
+                    // above because the input wraps. Repaint in place (the old
+                    // displayed length is the new one plus the char just popped).
+                    redraw_input_inplace((int)(prompt.length() + command.length() + 1));
+                }
             }
         }
         else if (key == 10 || key == 13) { // Enter

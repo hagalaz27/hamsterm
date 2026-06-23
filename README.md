@@ -21,6 +21,11 @@ shell-style globbing, and user variables - all driven from the device keyboard.
 - **SSH:** password-based SSH client (LibSSH-ESP32) for a remote shell
 - **Editor:** `edit` / `ed` - full-screen editor with cursor keys and Ctrl shortcuts
 - **System:** `help`, `sysinfo`, `free`, `df`, `battery`, `reboot`
+- **Startup script:** commands in `/.profile` run automatically at boot, one per
+  line, exactly as if typed (`#` comments and blank lines are ignored). Lives on
+  internal flash, so it's always available. Edit with `ed /.profile` and reboot to
+  apply. Handy for setting variables, `cd`-ing to a working dir, connecting to
+  Wi-Fi (`wf c <ssid>` then the password on the next line), or printing a banner.
 
 Type `help` on the device for the full list.
 
