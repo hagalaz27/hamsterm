@@ -2,6 +2,7 @@
 #include "Terminal.h"
 #include "CommonCmds.h"
 #include "Version.h"
+#include "HttpdCmds.h"
 
 // libssh (LibSSH-ESP32) one-time init helper.
 #include "libssh_esp32.h"
@@ -208,5 +209,6 @@ void loop() {
             }
         }
     }
+    HttpdCmds::loop(); // service HTTP requests when at the prompt
     delay(10);
 }

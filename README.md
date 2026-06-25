@@ -21,6 +21,12 @@ shell-style globbing, and user variables - all driven from the device keyboard.
 - **SSH:** password-based SSH client (LibSSH-ESP32) for a remote shell
 - **Editor:** `edit` / `ed` - full-screen editor with cursor keys and Ctrl shortcuts
 - **System:** `help`, `sysinfo`, `free`, `df`, `battery`, `reboot`
+- **Web server / file manager:** `httpd start [path]` serves a built-in file
+  manager on port 80, reachable on both the SoftAP IP and the Wi-Fi IP. From a
+  browser you can browse, download, **upload**, **edit text files**, **rename**,
+  **delete** (folders recursively), and **create folders** on internal flash and
+  `/sd`. Pass a `path` to expose only that subtree (e.g. `httpd start /docs`) -
+  access is confined to it. `httpd stop` / `httpd status` to manage it.
 - **Startup script:** commands in `/.profile` run automatically at boot, one per
   line, exactly as if typed (`#` comments and blank lines are ignored). Lives on
   internal flash, so it's always available. Edit with `ed /.profile` and reboot to

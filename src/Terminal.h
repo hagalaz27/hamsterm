@@ -12,6 +12,7 @@
 #include "NetworkCmds.h"
 #include "WiFiCmds.h"
 #include "SystemCmds.h"
+#include "HttpdCmds.h"
 #include "Editor.h"
 #include "Telnet.h"
 #include "Ssh.h"
@@ -1137,6 +1138,9 @@ public:
             }
             else if (cmd == "wget") {
                 emit("Usage: wget <url> [-o <path>]\n");
+            }
+            else if (cmd == "httpd" || cmd.rfind("httpd ", 0) == 0) {
+                HttpdCmds::httpd(cmd.size() > 5 ? cmd.substr(6) : "", emit);
             }
             else if (cmd == "reboot") {
                 emit("Rebooting...\n");
