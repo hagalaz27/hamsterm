@@ -6,6 +6,7 @@
 #include <SPI.h>
 #include <WiFi.h>
 #include <vector>
+#include <utility>
 #include <string>
 #include <functional>
 #include <ESP32Ping.h>
@@ -52,6 +53,19 @@ class Helpers {
     static void trim(std::string& s);
     static std::string make_absolute(const std::string& path);
     static std::vector<std::string> parse_parts(const std::string& args);
+
+    // --- quote-aware tokenizing (shell-style) ---
+    // tokenize: split on unquoted whitespace, honoring "..." and '...'; quotes
+    //   are removed. tokenize_ex also reports whether each token contained a
+    //   '*'/'?' OUTSIDE quotes (so quoting suppresses globbing).
+    static std::vector<std::string> tokenize(const std::string& s);
+    static std::vector<std::pair<std::string, bool>> tokenize_ex(const std::string& s);
+    // First index of `ch` that lies outside any quotes, or npos.
+    static size_t find_unquoted(const std::string& s, char ch, size_t from = 0);
+    // First whitespace-token of s with quotes removed (for redirect targets).
+    static std::string strip_quotes(const std::string& s);
+    // Wrap in double quotes if the string contains whitespace (else unchanged).
+    static std::string requote(const std::string& s);
 
     static void checkConnection(LineCallback emit);
     static std::string getHostname(IPAddress ip);

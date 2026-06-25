@@ -46,6 +46,10 @@ public:
 
 private:
     static std::vector<std::string> expand_token(const std::string& tok);
+    // Multi-component glob: expand a (possibly absolute) pattern whose '*'/'?'
+    // may appear in ANY path segment (e.g. "a*/b*/c.log"). Returns matching
+    // absolute paths, or empty if nothing matches.
+    static std::vector<std::string> expand_path(const std::string& absPattern);
     // Internal helpers for recursive operations
     static std::string path_join(const std::string& a, const std::string& b);
     static std::string base_name(const std::string& path);

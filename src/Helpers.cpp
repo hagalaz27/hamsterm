@@ -1,4 +1,5 @@
 #include "Helpers.h"
+#include <utility>
 
 std::string Helpers::currentDir = "/";
 std::vector<std::string> Helpers::lastOutput;
@@ -212,30 +213,63 @@ std::string Helpers::make_absolute(const std::string& path) {
     return normalize_path(fullPath);
 }
 
+std::vector<std::pair<std::string, bool>> Helpers::tokenize_ex(const std::string& s) {
+    std::vector<std::pair<std::string, bool>> out;
+    std::string cur;
+    bool inWord = false, glob = false;
+    size_t i = 0;
+    while (i < s.size()) {
+        char c = s[i];
+        if (c == ' ' || c == '\t') {
+            if (inWord) { out.push_back(std::make_pair(cur, glob)); cur.clear(); inWord = false; glob = false; }
+            i++;
+        } else if (c == '"' || c == '\'') {
+            char q = c; i++; inWord = true;
+            while (i < s.size() && s[i] != q) { cur += s[i]; i++; } // inside quotes: literal
+            if (i < s.size()) i++; // skip closing quote
+        } else {
+            inWord = true;
+            if (c == '*' || c == '?') glob = true; // unquoted glob char
+            cur += c; i++;
+        }
+    }
+    if (inWord) out.push_back(std::make_pair(cur, glob));
+    return out;
+}
+
+std::vector<std::string> Helpers::tokenize(const std::string& s) {
+    std::vector<std::string> out;
+    for (auto& t : tokenize_ex(s)) out.push_back(t.first);
+    return out;
+}
+
+size_t Helpers::find_unquoted(const std::string& s, char ch, size_t from) {
+    bool inS = false, inD = false;
+    for (size_t i = from; i < s.size(); i++) {
+        char c = s[i];
+        if (c == '\'' && !inD) inS = !inS;
+        else if (c == '"' && !inS) inD = !inD;
+        else if (c == ch && !inS && !inD) return i;
+    }
+    return std::string::npos;
+}
+
+std::string Helpers::strip_quotes(const std::string& s) {
+    auto toks = tokenize(s);
+    return toks.empty() ? std::string("") : toks[0];
+}
+
+std::string Helpers::requote(const std::string& s) {
+    if (s.empty() || s.find(' ') != std::string::npos || s.find('\t') != std::string::npos)
+        return "\"" + s + "\"";
+    return s;
+}
+
 std::vector<std::string> Helpers::parse_parts(const std::string& args) {
     std::vector<std::string> result;
-    size_t pos = 0;
-
-    while (true) {
-        size_t space = args.find(' ', pos);
-        std::string token;
-
-        if (space == std::string::npos) {
-            token = args.substr(pos);
-        } else {
-            token = args.substr(pos, space - pos);
-        }
-
-        if (!token.empty()) {
-            result.push_back(make_absolute(token));
-        }
-
-        if (space == std::string::npos)
-            break;
-
-        pos = space + 1;
+    for (auto& tok : tokenize(args)) {
+        if (!tok.empty()) result.push_back(make_absolute(tok));
     }
-
     return result;
 }
 

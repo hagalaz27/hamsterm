@@ -797,84 +797,115 @@ void CommonCmds::find(const std::string& startDir, const std::string& pattern,
     }
 }
 
-// Expand one whitespace-delimited token. If it contains no * or ?, it is
-// returned unchanged. Otherwise it is matched against the filesystem and
-// replaced by the sorted list of matching paths (the directory prefix the user
-// typed is preserved). Bash-style: if nothing matches, the literal token is
-// kept; a leading dot must be matched explicitly.
-std::vector<std::string> CommonCmds::expand_token(const std::string& tok) {
-    if (tok.find_first_of("*?") == std::string::npos) {
-        return { tok };
-    }
+// Expand a pattern whose wildcards may appear in ANY path segment. The pattern
+// is made absolute first, then matched segment by segment against the real
+// filesystem. Non-final segments must resolve to directories to keep going.
+// Bash-style: a leading dot must be matched explicitly; nothing-matches -> empty.
+std::vector<std::string> CommonCmds::expand_path(const std::string& pattern) {
+    std::string abs = Helpers::make_absolute(pattern);
 
-    // Split off the final path component (only the last component may glob).
-    std::string prefix, dirArg, pat;
-    size_t slash = tok.find_last_of('/');
-    if (slash == std::string::npos) {
-        prefix = "";
-        dirArg = ".";
-        pat = tok;
-    } else {
-        prefix = tok.substr(0, slash + 1);     // keep typed prefix incl. '/'
-        pat = tok.substr(slash + 1);
-        dirArg = tok.substr(0, slash);
-        if (dirArg.empty()) dirArg = "/";      // token like "/*.txt"
+    // split into path segments
+    std::vector<std::string> segs;
+    {
+        size_t i = 0;
+        while (i < abs.size()) {
+            while (i < abs.size() && abs[i] == '/') i++;
+            size_t j = i; while (j < abs.size() && abs[j] != '/') j++;
+            if (j > i) segs.push_back(abs.substr(i, j - i));
+            i = j;
+        }
     }
+    if (segs.empty()) return {};
 
-    // Glob only in the final component; otherwise leave literal.
-    if (pat.find_first_of("*?") == std::string::npos) {
-        return { tok };
-    }
+    const size_t MAXGLOB = 128;
+    std::vector<std::string> current; current.push_back("/"); // start at root dir
 
-    std::string absDir = Helpers::make_absolute(dirArg);
-    File d = Helpers::fsOpen(absDir, "r");
-    if (!d || !d.isDirectory()) {
-        if (d) d.close();
-        return { tok };
-    }
+    for (size_t s = 0; s < segs.size(); s++) {
+        const std::string& seg = segs[s];
+        bool last = (s + 1 == segs.size());
+        bool isGlob = seg.find_first_of("*?") != std::string::npos;
+        std::vector<std::string> next;
 
-    std::vector<std::string> matches;
-    File e = d.openNextFile();
-    while (e) {
-        std::string base = base_name(e.name());
-        e.close();
-        if (!base.empty()) {
-            bool hidden = (base[0] == '.');
-            bool patDot = (!pat.empty() && pat[0] == '.');
-            if (!(hidden && !patDot) && wildcard_match(pat, base)) {
-                matches.push_back(prefix + base);
+        for (size_t b = 0; b < current.size() && next.size() < MAXGLOB; b++) {
+            const std::string& dir = current[b];
+            std::string join = (dir == "/") ? ("/" + seg) : (dir + "/" + seg);
+
+            if (!isGlob) {
+                if (Helpers::fsExists(join)) {
+                    if (last) next.push_back(join);
+                    else {
+                        File t = Helpers::fsOpen(join, "r");
+                        bool d = (t && t.isDirectory()); if (t) t.close();
+                        if (d) next.push_back(join);
+                    }
+                }
+            } else {
+                File dh = Helpers::fsOpen(dir, "r");
+                if (dh && dh.isDirectory()) {
+                    // collect (name, isDir) first to avoid iterating while opening
+                    std::vector<std::pair<std::string, bool>> kids;
+                    File e = dh.openNextFile();
+                    while (e) {
+                        std::string nm = base_name(e.name());
+                        bool isd = e.isDirectory();
+                        e.close();
+                        if (!nm.empty()) kids.push_back(std::make_pair(nm, isd));
+                        e = dh.openNextFile();
+                    }
+                    dh.close();
+                    std::sort(kids.begin(), kids.end());
+                    bool patDot = (!seg.empty() && seg[0] == '.');
+                    for (size_t k = 0; k < kids.size() && next.size() < MAXGLOB; k++) {
+                        const std::string& nm = kids[k].first;
+                        if (nm[0] == '.' && !patDot) continue;        // hidden
+                        if (!wildcard_match(seg, nm)) continue;
+                        if (!last && !kids[k].second) continue;        // need a dir to descend
+                        next.push_back((dir == "/") ? ("/" + nm) : (dir + "/" + nm));
+                    }
+                } else if (dh) {
+                    dh.close();
+                }
             }
         }
-        e = d.openNextFile();
-    }
-    d.close();
 
-    if (matches.empty()) {
-        return { tok }; // no match -> keep literal
+        current.swap(next);
+        if (current.empty()) break;
     }
-    std::sort(matches.begin(), matches.end());
-    return matches;
+    return current;
+}
+
+// Back-compat single-token expander (now multi-component aware).
+std::vector<std::string> CommonCmds::expand_token(const std::string& tok) {
+    if (tok.find_first_of("*?") == std::string::npos) return { tok };
+    std::vector<std::string> m = expand_path(tok);
+    if (m.empty()) return { tok }; // no match -> keep literal
+    return m;
 }
 
 std::string CommonCmds::expand_globs(const std::string& cmdline) {
-    // Tokenize on whitespace (the shell has no quoting yet).
-    std::vector<std::string> toks;
-    std::string cur;
-    for (char c : cmdline) {
-        if (c == ' ' || c == '\t') {
-            if (!cur.empty()) { toks.push_back(cur); cur.clear(); }
-        } else {
-            cur += c;
-        }
-    }
-    if (!cur.empty()) toks.push_back(cur);
+    // Quote-aware tokenizing: each token carries whether it had an UNQUOTED
+    // glob char. Only such tokens are expanded; quotes suppress globbing.
+    std::vector<std::pair<std::string, bool>> toks = Helpers::tokenize_ex(cmdline);
 
     std::string out;
-    for (const auto& t : toks) {
-        std::vector<std::string> exp = expand_token(t);
-        for (const auto& piece : exp) {
-            if (!out.empty()) out += " ";
-            out += piece;
+    bool first = true;
+    for (size_t i = 0; i < toks.size(); i++) {
+        const std::string& text = toks[i].first;
+        bool hasGlob = toks[i].second;
+
+        std::vector<std::string> pieces;
+        if (i == 0 || !hasGlob) {
+            pieces.push_back(text);               // command name or literal token
+        } else {
+            std::vector<std::string> m = expand_path(text);
+            if (m.empty()) pieces.push_back(text); // no match -> keep literal
+            else pieces = m;
+        }
+
+        for (const auto& p : pieces) {
+            if (!first) out += " ";
+            first = false;
+            out += Helpers::requote(p);           // keep tokens with spaces atomic
         }
     }
     return out;

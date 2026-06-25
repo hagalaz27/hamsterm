@@ -539,25 +539,20 @@ public:
         file = "";
         append = false;
 
-        size_t pos = body.find(">>");
+        // Find the redirection operator OUTSIDE quotes, so a '>' inside a quoted
+        // filename is not treated as redirection.
+        size_t pos = Helpers::find_unquoted(body, '>');
         if (pos != std::string::npos) {
             text = body.substr(0, pos);
-            file = body.substr(pos + 2);
-            append = true;
+            if (pos + 1 < body.size() && body[pos + 1] == '>') { append = true; file = body.substr(pos + 2); }
+            else                                                { file = body.substr(pos + 1); }
         } else {
-            pos = body.find('>');
-            if (pos != std::string::npos) {
-                text = body.substr(0, pos);
-                file = body.substr(pos + 1);
-            } else {
-                text = body;
-            }
+            text = body;
         }
 
         if (!file.empty()) {
-            file.erase(0, file.find_first_not_of(" "));
-            size_t space = file.find(' ');
-            if (space != std::string::npos) file.erase(space);
+            // The target is the first (possibly quoted) token; strip the quotes.
+            file = Helpers::strip_quotes(file);
             if (!file.empty()) file = Helpers::make_absolute(file);
         }
     }
@@ -763,7 +758,7 @@ public:
         std::string grepPattern;
 
         // 1) Extract "| grep PATTERN"
-        size_t pipePos = cmd.find('|');
+        size_t pipePos = Helpers::find_unquoted(cmd, '|');
         if (pipePos != std::string::npos) {
             std::string right = cmd.substr(pipePos + 1);
             Helpers::trim(right);
@@ -1030,6 +1025,16 @@ public:
                 std::string text, file;
                 bool append;
                 parse_redirect(cmd.substr(5), text, file, append);
+                // If the text uses quotes, collapse them (quote-aware): the
+                // quoted runs keep their spaces, the quote chars are removed.
+                if (text.find('"') != std::string::npos || text.find('\'') != std::string::npos) {
+                    std::string joined;
+                    for (const auto& p : Helpers::tokenize(text)) {
+                        if (!joined.empty()) joined += " ";
+                        joined += p;
+                    }
+                    text = joined;
+                }
                 CommonCmds::echo(text, file, append, emit);
             }
             else if (cmd == "ls" || cmd.rfind("ls ", 0) == 0) {
@@ -1254,17 +1259,7 @@ public:
 
     // Splits a string on spaces, returning non-empty tokens (no make_absolute).
     static std::vector<std::string> split_ws(const std::string& s) {
-        std::vector<std::string> out;
-        size_t pos = 0;
-        while (true) {
-            size_t sp = s.find(' ', pos);
-            std::string tok = (sp == std::string::npos)
-                ? s.substr(pos) : s.substr(pos, sp - pos);
-            if (!tok.empty()) out.push_back(tok);
-            if (sp == std::string::npos) break;
-            pos = sp + 1;
-        }
-        return out;
+        return Helpers::tokenize(s);
     }
 
     // Safe unsigned-integer parse without relying on exceptions.
