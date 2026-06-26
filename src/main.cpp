@@ -58,6 +58,9 @@ void loop() {
             Keyboard_Class::KeysState status = kb.keysState();
 
             if (status.ctrl) {
+                // Ctrl + ; / . (read as : / > on this keyboard) -> scroll local output
+                if (kb.isKeyPressed(':')) { terminal->ssh_scroll_up();   return; }
+                if (kb.isKeyPressed('>')) { terminal->ssh_scroll_down(); return; }
                 for (auto c : status.word) {
                     char lc = (c >= 'A' && c <= 'Z') ? (c + 32) : c;
                     if (lc == 'q') { terminal->ssh_disconnect(); return; }
@@ -67,8 +70,8 @@ void loop() {
             if (kb.isKeyPressed(KEY_FN)) {
                 if (kb.isKeyPressed(';')) { terminal->ssh_arrow("\x1b[A"); return; } // up    -> server
                 if (kb.isKeyPressed('.')) { terminal->ssh_arrow("\x1b[B"); return; } // down  -> server
-                if (kb.isKeyPressed(',')) { terminal->ssh_scroll_up();   return; }   // left  -> scroll
-                if (kb.isKeyPressed('/')) { terminal->ssh_scroll_down(); return; }   // right -> scroll
+                if (kb.isKeyPressed(',')) { terminal->ssh_arrow("\x1b[D"); return; } // left  -> server
+                if (kb.isKeyPressed('/')) { terminal->ssh_arrow("\x1b[C"); return; } // right -> server
                 return;
             }
             if (status.del)        terminal->ssh_on_backspace();
@@ -90,8 +93,11 @@ void loop() {
             auto& kb = M5Cardputer.Keyboard;
             Keyboard_Class::KeysState status = kb.keysState();
 
-            // Ctrl: Ctrl+Q quits; other Ctrl+letter -> control byte (Ctrl+C etc.)
+            // Ctrl: Ctrl+;/. (read as :/> here) scroll; Ctrl+Q quits;
+            // other Ctrl+letter -> control byte (Ctrl+C etc.)
             if (status.ctrl) {
+                if (kb.isKeyPressed(':')) { terminal->telnet_scroll_up();   return; }
+                if (kb.isKeyPressed('>')) { terminal->telnet_scroll_down(); return; }
                 for (auto c : status.word) {
                     char lc = (c >= 'A' && c <= 'Z') ? (c + 32) : c;
                     if (lc == 'q') { terminal->telnet_disconnect(); return; }
@@ -102,13 +108,12 @@ void loop() {
                 }
             }
 
-            // Arrows: left/right scroll the screen (like the terminal);
-            // up/down send ANSI cursor sequences to the server (for char mode).
+            // Fn + arrows -> send ANSI cursor sequences to the server.
             if (kb.isKeyPressed(KEY_FN)) {
-                if (kb.isKeyPressed(';')) { terminal->telnet_arrow("\x1b[A"); return; } // up -> server
-                if (kb.isKeyPressed('.')) { terminal->telnet_arrow("\x1b[B"); return; } // down -> server
-                if (kb.isKeyPressed(',')) { terminal->telnet_scroll_up();   return; }   // left -> scroll up
-                if (kb.isKeyPressed('/')) { terminal->telnet_scroll_down(); return; }   // right -> scroll down
+                if (kb.isKeyPressed(';')) { terminal->telnet_arrow("\x1b[A"); return; } // up    -> server
+                if (kb.isKeyPressed('.')) { terminal->telnet_arrow("\x1b[B"); return; } // down  -> server
+                if (kb.isKeyPressed(',')) { terminal->telnet_arrow("\x1b[D"); return; } // left  -> server
+                if (kb.isKeyPressed('/')) { terminal->telnet_arrow("\x1b[C"); return; } // right -> server
                 return;
             }
 
@@ -164,15 +169,23 @@ void loop() {
         }
 
         // ===== Normal terminal mode =====
-        // 1. First check the physical arrow keys (Fn + ; . , /)
+        Keyboard_Class::KeysState status = M5Cardputer.Keyboard.keysState();
+
+        // Ctrl + ; / .  -> scroll the output up / down.
+        // On this keyboard the Ctrl key also shifts characters, so Ctrl+; reads
+        // as ':' and Ctrl+. reads as '>'. Gating on status.ctrl keeps a plain
+        // Shift+; (which types ':') from scrolling.
+        if (status.ctrl) {
+            if (M5Cardputer.Keyboard.isKeyPressed(':')) { terminal->handle_keypress(181); return; } // scroll up
+            if (M5Cardputer.Keyboard.isKeyPressed('>')) { terminal->handle_keypress(182); return; } // scroll down
+        }
+
+        // Physical arrow keys (Fn + ; . , /):
+        //   Fn + ; = UP, Fn + . = DOWN, Fn + , = LEFT, Fn + / = RIGHT
+        //   UP/DOWN    -> command history (bash-like)
+        //   LEFT/RIGHT -> move the edit cursor within the line
+        // (Output scrolling moved to Ctrl + ; / . above.)
         if (M5Cardputer.Keyboard.isKeyPressed(KEY_FN)) {
-            // Cardputer 'arrow' layout:
-            //   Fn + ; = UP, Fn + . = DOWN, Fn + , = LEFT, Fn + / = RIGHT
-            //
-            // UP/DOWN -> command history (bash-like).
-            // LEFT/RIGHT -> screen scrolling.
-            // (To put scrolling back on UP/DOWN, swap the codes:
-            //  181/182 = scroll, 183/184 = history.)
             if (M5Cardputer.Keyboard.isKeyPressed(';')) {
                 terminal->handle_keypress(183); // history back (previous)
                 return;
@@ -182,17 +195,14 @@ void loop() {
                 return;
             }
             if (M5Cardputer.Keyboard.isKeyPressed(',')) {
-                terminal->handle_keypress(181); // scroll up
+                terminal->handle_keypress(185); // cursor left
                 return;
             }
             if (M5Cardputer.Keyboard.isKeyPressed('/')) {
-                terminal->handle_keypress(182); // scroll down
+                terminal->handle_keypress(186); // cursor right
                 return;
             }
         }
-
-        // 2. Not an arrow key -> use the standard key state
-        Keyboard_Class::KeysState status = M5Cardputer.Keyboard.keysState();
 
         if (status.tab) { // Tab pressed
             terminal->handle_tab();

@@ -35,6 +35,22 @@ shell-style globbing, and user variables - all driven from the device keyboard.
 
 Type `help` on the device for the full list.
 
+## Keys
+
+The Cardputer's arrow keys are `Fn` + `;` `.` `,` `/` (up / down / left / right).
+
+| Key | Action |
+| --- | --- |
+| Up / Down (`Fn`+`;` / `Fn`+`.`) | Command history: previous / next |
+| Left / Right (`Fn`+`,` / `Fn`+`/`) | Move the edit cursor within the line |
+| `Ctrl`+`;` / `Ctrl`+`.` | Scroll the output up / down |
+| `Tab` | Autocomplete a name from the last `ls` |
+
+In the **editor**, the arrows move the cursor and `Ctrl`+`S` / `Ctrl`+`X` / `Ctrl`+`Q`
+save / save&exit / quit. In **telnet / SSH** sessions, `Ctrl`+`;` / `Ctrl`+`.` scroll
+the local screen back, the `Fn` arrows are sent to the remote host, `Ctrl`+`Q`
+disconnects, and other `Ctrl`+letter combos send control bytes (e.g. `Ctrl`+`C`).
+
 ## Hardware
 M5Stack Cardputer - ESP32-S3 (Wi-Fi + BLE), ~512 KB SRAM (no PSRAM), 8 MB flash,
 240x135 display, 56-key keyboard, microSD, IR LED, mic and speaker.

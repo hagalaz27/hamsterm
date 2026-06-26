@@ -21,6 +21,8 @@
 class Terminal {
 private:
     std::string command = "";
+    size_t cursorPos = 0;                  // edit cursor within `command` (0..len)
+    int inputStartY = 0;                   // screen Y of the input line's first row
     std::string prompt = ">";
     std::vector<std::string> history;
     int max_history = 100;
@@ -68,7 +70,7 @@ public:
         M5Cardputer.Display.setCursor(0, 0);
         M5Cardputer.Display.setFont(&fonts::efontCN_14);
         M5Cardputer.Display.setTextSize(1);
-        M5Cardputer.Display.print(prompt.c_str());
+        print_prompt();
         run_profile(); // auto-run commands from /.profile, if present
     }
 
@@ -157,6 +159,17 @@ public:
         if (scroll_offset == 0) {
             M5Cardputer.Display.print(prompt.c_str());
             M5Cardputer.Display.print(command.c_str());
+            // Derive the input's first row by counting back from the END cursor
+            // (same method as redraw_input_inplace). Capturing it BEFORE printing
+            // is wrong when the prompt+command printing scrolls the screen.
+            const int lineH = 14;
+            int cpr = M5Cardputer.Display.width() / 7; if (cpr < 1) cpr = 1;
+            int newLen = (int)(prompt.length() + command.length());
+            int endY = M5Cardputer.Display.getCursorY();
+            int endRows = (newLen >= 1) ? (newLen - 1) / cpr : 0; // see redraw_input_inplace
+            inputStartY = endY - endRows * lineH;
+            if (inputStartY < 0) inputStartY = 0;
+            draw_caret();
         }
     }
 
@@ -236,7 +249,8 @@ public:
         // Repaint only the input rows in place (no full-screen clear) so that
         // cycling candidates with Tab doesn't flicker. Wrap-aware.
         command += suffix;
-        redraw_input_inplace(oldLen);
+        cursorPos = command.length();
+        render_input(oldLen);
     }
 
     // Redraw "prompt + command" in place, clearing exactly the display rows the
@@ -250,7 +264,12 @@ public:
         if (cpr < 1) cpr = 1;
 
         int endY   = M5Cardputer.Display.getCursorY();
-        int startY = endY - (oldLen / cpr) * lineH; // first row of the input
+        // Row offset of the END cursor. The display does not advance to the next
+        // row until the next char is printed, so a line of exactly N*cpr chars
+        // leaves the cursor on row (len-1)/cpr, not len/cpr. Using len/cpr here
+        // put startY one row too high on exactly-full lines and left an artifact.
+        int endRows = (oldLen >= 1) ? (oldLen - 1) / cpr : 0;
+        int startY = endY - endRows * lineH; // first row of the input
         if (startY < 0) startY = 0;
 
         int newLen  = (int)(prompt.length() + command.length());
@@ -270,6 +289,39 @@ public:
         M5Cardputer.Display.setCursor(0, startY);
         M5Cardputer.Display.print(prompt.c_str());
         M5Cardputer.Display.print(command.c_str());
+        inputStartY = startY;
+    }
+
+    // Draw the edit cursor (an underline) at cursorPos within the input line,
+    // accounting for wrapping. Uses inputStartY as the input's first row.
+    void draw_caret() {
+        const int lineH = 14;
+        int cpr = M5Cardputer.Display.width() / 7;
+        if (cpr < 1) cpr = 1;
+        int idx  = (int)(prompt.length() + cursorPos); // always >= 1 (prompt)
+        // Match the display's no-wrap-until-next-char behaviour so the caret
+        // never lands on a row beyond the drawn text (which would not be cleared
+        // on the next repaint and would leave a stray underline).
+        int crow = (idx - 1) / cpr;
+        int ccol = (idx - 1) % cpr + 1;
+        int cx = ccol * 7;
+        int cy = inputStartY + crow * lineH;
+        M5Cardputer.Display.fillRect(cx, cy + lineH - 2, 7, 2, WHITE);
+    }
+
+    // Repaint the input line in place and draw the caret. oldLen is the
+    // prompt+command length previously on screen (so old rows get cleared).
+    void render_input(int oldLen) {
+        redraw_input_inplace(oldLen); // sets inputStartY (or refresh_screen does)
+        draw_caret();
+    }
+
+    // Print a fresh prompt for input and show the edit caret right after it.
+    // Used at every point that returns the user to the command line.
+    void print_prompt() {
+        M5Cardputer.Display.print(prompt.c_str());
+        inputStartY = M5Cardputer.Display.getCursorY();
+        draw_caret();
     }
 
     // Redraw the input line (full screen repaint - reliable for
@@ -288,6 +340,7 @@ public:
         if (historyIndex > 0) {
             historyIndex--;
             command = cmdHistory[historyIndex];
+            cursorPos = command.length();
             redraw_input();
         }
     }
@@ -302,6 +355,7 @@ public:
         } else {
             command = cmdHistory[historyIndex];
         }
+        cursorPos = command.length();
         redraw_input();
     }
 
@@ -314,7 +368,7 @@ public:
             print(editor->error() + std::string("\n"));
             delete editor;
             editor = nullptr;
-            M5Cardputer.Display.print(prompt.c_str());
+            print_prompt();
             return;
         }
         editorActive = true;
@@ -343,7 +397,7 @@ public:
     void start_telnet(const std::string& host, uint16_t port, bool raw) {
         if (WiFi.status() != WL_CONNECTED) {
             print("Not connected to WiFi\n");
-            M5Cardputer.Display.print(prompt.c_str());
+            print_prompt();
             return;
         }
         print("Connecting to " + host + ":" + std::to_string(port) + "...\n");
@@ -352,7 +406,7 @@ public:
             print("telnet: connection failed\n");
             delete telnet;
             telnet = nullptr;
-            M5Cardputer.Display.print(prompt.c_str());
+            print_prompt();
             return;
         }
         telnetActive = true;
@@ -406,7 +460,7 @@ public:
                 long v; if (parse_uint(toks[++i], v) && v >= 1 && v <= 65535) port = (uint16_t)v;
             } else positional.push_back(toks[i]);
         }
-        if (positional.empty()) { print("Usage: ssh [user@]host [port]\n"); M5Cardputer.Display.print(prompt.c_str()); return; }
+        if (positional.empty()) { print("Usage: ssh [user@]host [port]\n"); print_prompt(); return; }
 
         std::string target = positional[0];
         size_t at = target.find('@');
@@ -415,9 +469,9 @@ public:
         // optional bare port as second positional
         if (positional.size() >= 2) { long v; if (parse_uint(positional[1], v) && v >= 1 && v <= 65535) port = (uint16_t)v; }
 
-        if (host.empty()) { print("ssh: no host\n"); M5Cardputer.Display.print(prompt.c_str()); return; }
-        if (user.empty()) { print("ssh: no user (use user@host or -l user)\n"); M5Cardputer.Display.print(prompt.c_str()); return; }
-        if (WiFi.status() != WL_CONNECTED) { print("Not connected to WiFi\n"); M5Cardputer.Display.print(prompt.c_str()); return; }
+        if (host.empty()) { print("ssh: no host\n"); print_prompt(); return; }
+        if (user.empty()) { print("ssh: no user (use user@host or -l user)\n"); print_prompt(); return; }
+        if (WiFi.status() != WL_CONNECTED) { print("Not connected to WiFi\n"); print_prompt(); return; }
 
         sshUser = user; sshHost = host; sshPort = port;
         sshWaitingForPass = true;
@@ -432,7 +486,7 @@ public:
         if (!ssh->begin(sshHost, sshUser, password, sshPort)) {
             print(ssh->error() + std::string("\n"));
             delete ssh; ssh = nullptr;
-            M5Cardputer.Display.print(prompt.c_str());
+            print_prompt();
             return;
         }
         sshActive = true;
@@ -471,11 +525,11 @@ public:
         tabMatches.clear();
 
         // Cardputer key codes
-        if (key == 181) {            // scroll up (Fn+,)
+        if (key == 181) {            // scroll output up (Ctrl+;)
             scroll_up();
             return;
         }
-        if (key == 182) {            // scroll down (Fn+/)
+        if (key == 182) {            // scroll output down (Ctrl+.)
             scroll_down();
             return;
         }
@@ -493,33 +547,43 @@ public:
             refresh_screen();
         }
 
-        if (key == 8) { // Backspace
-            if (command.length() > 0) {
-                command.pop_back();
+        if (key == 185) {            // cursor left (Fn+, - 'left')
+            if (cursorPos > 0) {
+                cursorPos--;
+                render_input((int)(prompt.length() + command.length()));
+            }
+            return;
+        }
+        if (key == 186) {            // cursor right (Fn+/ - 'right')
+            if (cursorPos < command.length()) {
+                cursorPos++;
+                render_input((int)(prompt.length() + command.length()));
+            }
+            return;
+        }
+
+        if (key == 8) { // Backspace - delete the char before the cursor
+            if (cursorPos > 0) {
+                int oldLen = (int)(prompt.length() + command.length());
+                command.erase(cursorPos - 1, 1);
+                cursorPos--;
                 historyIndex = (int)cmdHistory.size(); // editing detaches from history
-                int x = M5Cardputer.Display.getCursorX();
-                if (x >= 7) {
-                    // Fast path: erase one char on the current row.
-                    int y = M5Cardputer.Display.getCursorY();
-                    M5Cardputer.Display.fillRect(x - 7, y, 7, 14, BLACK);
-                    M5Cardputer.Display.setCursor(x - 7, y);
-                } else {
-                    // At the left edge: the char being removed sits on the row
-                    // above because the input wraps. Repaint in place (the old
-                    // displayed length is the new one plus the char just popped).
-                    redraw_input_inplace((int)(prompt.length() + command.length() + 1));
-                }
+                render_input(oldLen);
             }
         }
         else if (key == 10 || key == 13) { // Enter
+            // Repaint the input line without the caret so the underline doesn't
+            // linger on the entered line, then run the command.
+            redraw_input_inplace((int)(prompt.length() + command.length()));
             M5Cardputer.Display.println();
             execute_command();
         }
-        else if (key >= 32 && key <= 126) {
-            char c = (char)key;
-            command += c;
+        else if (key >= 32 && key <= 126) { // insert at the cursor
+            int oldLen = (int)(prompt.length() + command.length());
+            command.insert(cursorPos, 1, (char)key);
+            cursorPos++;
             historyIndex = (int)cmdHistory.size(); // editing detaches from history
-            M5Cardputer.Display.print(c);
+            render_input(oldLen);
         }
     }
 
@@ -695,6 +759,7 @@ public:
         std::string cmd = command;
         Helpers::trim(cmd);
         command = "";
+        cursorPos = 0;
 
         // By default output goes to the screen.
         LineCallback emit = [this](const std::string& s) {
@@ -703,6 +768,8 @@ public:
 
         if (cmd.empty()) {
             emit(prompt);
+            inputStartY = M5Cardputer.Display.getCursorY();
+            draw_caret();
             return;
         }
 
@@ -712,7 +779,7 @@ public:
 
         if (WiFiCmds::waitingForPass) {
             WiFiCmds::wifi_connect_with_pass(cmd, emit);
-            M5Cardputer.Display.print(prompt.c_str());
+            print_prompt();
             return;
         }
 
@@ -740,7 +807,7 @@ public:
         // Variable management (set / unset / NAME=value) is handled here,
         // before the pipeline and glob machinery.
         if (handle_var_command(cmd, emit)) {
-            M5Cardputer.Display.print(prompt.c_str());
+            print_prompt();
             return;
         }
 
@@ -810,7 +877,7 @@ public:
             redirectFile = Helpers::fsOpen(redirectTarget, redirectAppend ? "a" : "w");
             if (!redirectFile) {
                 emit("Cannot write to " + Helpers::clearFilename(redirectTarget) + "\n");
-                M5Cardputer.Display.print(prompt.c_str());
+                print_prompt();
                 return;
             }
             sink = [&redirectFile](const std::string& s) {
@@ -839,7 +906,7 @@ public:
 
         // 5) Empty left command (e.g. "> file" or "| grep x" with no command)
         if (cmd.empty()) {
-            M5Cardputer.Display.print(prompt.c_str());
+            print_prompt();
             return;
         }
 
@@ -1251,7 +1318,7 @@ public:
         }
 
         if (!WiFiCmds::waitingForPass) {
-            M5Cardputer.Display.print(prompt.c_str());
+            print_prompt();
         }
     }
 
