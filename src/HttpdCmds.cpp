@@ -18,7 +18,7 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(<!DOCTYPE html><html><head><meta
 body{font-family:ui-monospace,monospace;background:#0a0d0b;color:#d8e6d2;margin:0;padding:14px}
 a{color:#ff9f1c;text-decoration:none;cursor:pointer}a:hover{text-decoration:underline}.d{color:#7fd6a8}
 h1{font-size:17px;margin:0 0 8px;color:#fff}
-#nav{margin-bottom:8px;font-size:13px}#nav a,#nav label{margin-right:14px;color:#ff9f1c;cursor:pointer}#nav label:hover{text-decoration:underline}
+#nav{margin-bottom:8px;font-size:13px}#nav .navrow{margin-bottom:4px}#nav a,#nav label{margin-right:14px;color:#ff9f1c;cursor:pointer}#nav label:hover{text-decoration:underline}
 #cur{color:#6f8;margin-bottom:6px;font-size:13px}
 .row{padding:5px 0;border-bottom:1px solid #18201a;display:flex;justify-content:space-between;gap:10px;align-items:center}
 .row>span:first-child{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
@@ -54,9 +54,8 @@ function go(p){
   ROOT=j.root;
   document.getElementById('cur').textContent=j.path;
   var nav='';
-  if(ROOT==='/'){nav+='<a onclick="go(\'/\')">[ internal ]</a><a onclick="go(\'/sd\')">[ /sd ]</a>';}
-  nav+='<a onclick="mkdir(\''+j.path+'\')">[ dir ]</a>';
-  nav+='<label>[ upload ]<input type="file" style="display:none" onchange="upload(this,\''+j.path+'\')"></label>';
+  if(ROOT==='/'){nav+='<div class="navrow"><a onclick="go(\'/\')">[ internal ]</a><a onclick="go(\'/sd\')">[ sd ]</a></div>';}
+  nav+='<div class="navrow"><a onclick="newfile(\''+j.path+'\')">[ + file ]</a><a onclick="mkdir(\''+j.path+'\')">[ + dir ]</a><label>[ + upload ]<input type="file" style="display:none" onchange="upload(this,\''+j.path+'\')"></label></div>';
   document.getElementById('nav').innerHTML=nav;
   var h='';
   if(j.path!==ROOT){var up=j.path.replace(/\/[^/]*$/,'')||'/';h+=row('<a onclick="go(\''+up+'\')">../</a>','');}
@@ -69,6 +68,7 @@ function go(p){
   document.getElementById('list').innerHTML=h||row('(empty)','');
  }).catch(function(){document.getElementById('list').textContent='error'})
 }
+function newfile(dir){var n=prompt('New file name');if(!n)return;post('/newfile?path='+encodeURIComponent(dir.replace(/\/$/,'')+'/'+n)).then(function(){go(dir)})}
 function mkdir(dir){var n=prompt('New folder name');if(!n)return;post('/mkdir?path='+encodeURIComponent(dir.replace(/\/$/,'')+'/'+n)).then(function(){go(dir)})}
 function rm(p){var par=p.replace(/\/[^/]*$/,'')||'/';post('/rm?path='+encodeURIComponent(p)).then(function(){go(par)})}
 var actPath='';
@@ -217,6 +217,19 @@ static void handleMkdir() {
     g_server->send(ok ? 200 : 500, "text/plain", ok ? "ok" : "mkdir failed");
 }
 
+static void handleNewFile() {
+    std::string real;
+    if (!g_server->hasArg("path") || !confine(std::string(g_server->arg("path").c_str()), real)) {
+        g_server->send(403, "text/plain", "denied"); return;
+    }
+    std::string fsPath; fs::FS& F = Helpers::fsFor(real, fsPath);
+    if (F.exists(fsPath.c_str())) { g_server->send(409, "text/plain", "already exists"); return; }
+    File f = F.open(fsPath.c_str(), "w"); // create an empty file
+    if (!f) { g_server->send(500, "text/plain", "create failed"); return; }
+    f.close();
+    g_server->send(200, "text/plain", "ok");
+}
+
 // Delete a file, or a directory and everything inside it. Children are
 // collected first (don't mutate a directory while iterating it), then removed.
 static bool removeRecursive(fs::FS& F, const std::string& path) {
@@ -322,6 +335,7 @@ void HttpdCmds::start(LineCallback emit, const std::string& rootArg) {
     g_server->on("/raw",   handleRaw);
     g_server->on("/save",  HTTP_POST, handleSave);
     g_server->on("/mkdir", HTTP_POST, handleMkdir);
+    g_server->on("/newfile", HTTP_POST, handleNewFile);
     g_server->on("/rm",    HTTP_POST, handleRm);
     g_server->on("/rename", HTTP_POST, handleRename);
     g_server->on("/upload", HTTP_POST, handleUploadFinish, handleUploadChunk);

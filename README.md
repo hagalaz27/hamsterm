@@ -24,7 +24,7 @@ shell-style globbing, and user variables - all driven from the device keyboard.
 - **Web server / file manager:** `httpd start [path]` serves a built-in file
   manager on port 80, reachable on both the SoftAP IP and the Wi-Fi IP. From a
   browser you can browse, download, **upload**, **edit text files**, **rename**,
-  **delete** (folders recursively), and **create folders** on internal flash and
+  **delete** (folders recursively), and **create files and folders** on internal flash and
   `/sd`. Pass a `path` to expose only that subtree (e.g. `httpd start /docs`) -
   access is confined to it. `httpd stop` / `httpd status` to manage it.
 - **Startup script:** commands in `/.profile` run automatically at boot, one per
