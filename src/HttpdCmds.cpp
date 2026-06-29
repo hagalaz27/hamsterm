@@ -313,9 +313,10 @@ static void handleUploadChunk() {
 
 // ---- command ---------------------------------------------------------------
 void HttpdCmds::start(LineCallback emit, const std::string& rootArg) {
-    if (g_server) { emit("httpd: already running\n"); return; }
+    if (g_server) { emit("httpd: already running\n"); Helpers::cmd_status = 1; return; }
     if (!apActive() && !staActive()) {
         emit("httpd: no network - start an AP ('ap ...') or connect Wi-Fi ('wf c ...')\n");
+        Helpers::cmd_status = 1;
         return;
     }
     std::string root = "/";
@@ -323,7 +324,7 @@ void HttpdCmds::start(LineCallback emit, const std::string& rootArg) {
         root = normalizePath(rootArg);
         std::string fsPath; fs::FS& F = Helpers::fsFor(root, fsPath);
         File d = F.open(fsPath.c_str());
-        if (!d || !d.isDirectory()) { if (d) d.close(); emit("httpd: not a directory: " + root + "\n"); return; }
+        if (!d || !d.isDirectory()) { if (d) d.close(); emit("httpd: not a directory: " + root + "\n"); Helpers::cmd_status = 1; return; }
         d.close();
     }
     g_root = root;
@@ -377,5 +378,5 @@ void HttpdCmds::httpd(const std::string& args, LineCallback emit) {
     if (sub == "start")                      start(emit, rest);
     else if (sub == "stop")                  stop(emit);
     else if (sub.empty() || sub == "status") status(emit);
-    else emit("Usage: httpd [start [path] | stop | status]\n");
+    else { emit("Usage: httpd [start [path] | stop | status]\n"); Helpers::cmd_status = 1; }
 }

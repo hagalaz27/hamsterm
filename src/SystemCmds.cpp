@@ -43,14 +43,18 @@ void SystemCmds::help(LineCallback emit) {
     emit("       nc <host> <port>\n");
     emit("       ssh [user@]host [port]\n");
     emit("Sys:   help sysinfo free battery\n");
-    emit("       reboot\n");
+    emit("       reboot | sh [-v] <file> [args]\n");
     emit("Vars:  set [NAME val] | NAME=val\n");
     emit("       unset NAME | $NAME expands\n");
+    emit("       $1..$9 $@ $# (script args)\n");
+    emit("       $? = last exit code\n");
     emit("Pipe:  cmd > f | cmd >> f\n");
     emit("       cmd | grep <text>\n");
+    emit("       a && b | a || b\n");
     emit("Keys:  Tab=complete\n");
     emit("       Fn+;/. = history\n");
-    emit("       Fn+,// = scroll\n");
+    emit("       Fn+,// = cursor\n");
+    emit("       Ctrl+;/. = scroll\n");
 }
 
 void SystemCmds::sysinfo(LineCallback emit) {

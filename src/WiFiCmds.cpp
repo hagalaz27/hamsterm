@@ -166,6 +166,7 @@ void WiFiCmds::ap_start(const std::string& ssid, const std::string& password, Li
                    : WiFi.softAP(ssid.c_str(), password.c_str(), chan);
     if (!ok) {
         emit("ap: failed to start\n");
+        Helpers::cmd_status = 1;
         return;
     }
 

@@ -8,6 +8,7 @@ const long Helpers::gmtOffset_sec = 2 * 3600;     // UTC+2 (Ukraine)
 const int Helpers::daylightOffset_sec = 3600;
 
 bool Helpers::sdMounted = false;
+int Helpers::cmd_status = 0;
 const char* Helpers::SD_MOUNT = "/sd";
 
 /* ===================== FS router (LittleFS / SD) ===================== */
@@ -83,6 +84,7 @@ bool Helpers::mountSD(LineCallback emit) {
 
     if (!SD.begin(SD_CS, SPI)) {
         emit("mount: SD card not found\n");
+        cmd_status = 1;
         SPI.end();
         return false;
     }
@@ -90,6 +92,7 @@ bool Helpers::mountSD(LineCallback emit) {
     uint8_t cardType = SD.cardType();
     if (cardType == CARD_NONE) {
         emit("mount: no SD card\n");
+        cmd_status = 1;
         SD.end();
         SPI.end();
         return false;
@@ -111,6 +114,7 @@ bool Helpers::mountSD(LineCallback emit) {
 void Helpers::umountSD(LineCallback emit) {
     if (!sdMounted) {
         emit("umount: nothing mounted\n");
+        cmd_status = 1;
         return;
     }
 
@@ -290,6 +294,7 @@ void Helpers::checkConnection(LineCallback emit) {
         initTime();
     } else {
         emit("Failed to connect.\n");
+        cmd_status = 1;
         // Stop the background retry loop: otherwise the driver keeps trying
         // with the wrong credentials, which also breaks the next Wi-Fi scan.
         WiFi.disconnect(false, false);

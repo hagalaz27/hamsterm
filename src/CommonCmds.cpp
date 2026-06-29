@@ -41,6 +41,7 @@ void CommonCmds::cat(const std::vector<std::string>& files, const std::string& o
         fileForText = Helpers::fsOpen(outFile, append ? "a" : "w");
         if (!fileForText) {
             emit("cat: cannot write to " + Helpers::clearFilename(outFile) + "\n");
+            Helpers::cmd_status = 1;
             return;
         }
     }
@@ -49,12 +50,14 @@ void CommonCmds::cat(const std::vector<std::string>& files, const std::string& o
 
         if (!Helpers::fsExists(filename)) {
             emit("cat: " + Helpers::clearFilename(filename) + ": No such file or directory\n");
+            Helpers::cmd_status = 1;
             continue;
         }
 
         File file = Helpers::fsOpen(filename, "r");
         if (!file || file.isDirectory()) {
             emit("cat: " + Helpers::clearFilename(filename) + " is a directory\n");
+            Helpers::cmd_status = 1;
             continue;
         }
 
@@ -117,6 +120,7 @@ void CommonCmds::head(const std::string& file, size_t n, LineCallback emit) {
     File f = Helpers::fsOpen(file, "r");
     if (!f || f.isDirectory()) {
         emit("head: " + Helpers::clearFilename(file) + ": No such file\n");
+        Helpers::cmd_status = 1;
         return;
     }
 
@@ -151,6 +155,7 @@ void CommonCmds::tail(const std::string& file, size_t n, LineCallback emit) {
     File f = Helpers::fsOpen(file, "r");
     if (!f || f.isDirectory()) {
         emit("tail: " + Helpers::clearFilename(file) + ": No such file\n");
+        Helpers::cmd_status = 1;
         return;
     }
 
@@ -197,6 +202,7 @@ void CommonCmds::cd(const std::string& command, LineCallback emit) {
 
     if (Helpers::isSdPath(newPath) && !Helpers::sdMounted) {
         emit("cd: /sd: SD not mounted (use 'mount')\n");
+        Helpers::cmd_status = 1;
         return;
     }
 
@@ -205,6 +211,7 @@ void CommonCmds::cd(const std::string& command, LineCallback emit) {
         Helpers::currentDir = newPath;
     } else {
         emit("cd: " + newPath + ": No such directory\n");
+        Helpers::cmd_status = 1;
     }
     if (check){
         check.close();
@@ -235,12 +242,14 @@ bool CommonCmds::copy_file(const std::string& src, const std::string& dst, LineC
     File srcFile = Helpers::fsOpen(src, "r");
     if (!srcFile) {
         emit("cp: " + Helpers::clearFilename(src) + ": No such file\n");
+        Helpers::cmd_status = 1;
         return false;
     }
 
     File dstFile = Helpers::fsOpen(dst, "w");
     if (!dstFile) {
         emit("cp: cannot create " + Helpers::clearFilename(dst) + "\n");
+        Helpers::cmd_status = 1;
         srcFile.close();
         return false;
     }
@@ -262,6 +271,7 @@ bool CommonCmds::copy_recursive(const std::string& src, const std::string& dst, 
     File s = Helpers::fsOpen(src, "r");
     if (!s) {
         emit("cp: " + Helpers::clearFilename(src) + ": No such file or directory\n");
+        Helpers::cmd_status = 1;
         return false;
     }
 
@@ -275,6 +285,7 @@ bool CommonCmds::copy_recursive(const std::string& src, const std::string& dst, 
     if (!Helpers::fsExists(dst)) {
         if (!Helpers::fsMkdir(dst)) {
             emit("cp: cannot create directory " + Helpers::clearFilename(dst) + "\n");
+            Helpers::cmd_status = 1;
             s.close();
             return false;
         }
@@ -317,6 +328,7 @@ void CommonCmds::cp(const std::vector<std::string>& srcs, const std::string& dst
     // When copying several items, dst MUST be a directory
     if (srcs.size() > 1 && !dstIsDir) {
         emit("cp: target '" + Helpers::clearFilename(dst) + "' is not a directory\n");
+        Helpers::cmd_status = 1;
         return;
     }
 
@@ -325,6 +337,7 @@ void CommonCmds::cp(const std::vector<std::string>& srcs, const std::string& dst
         File srcFile = Helpers::fsOpen(src, "r");
         if (!srcFile) {
             emit("cp: " + Helpers::clearFilename(src) + ": No such file\n");
+            Helpers::cmd_status = 1;
             continue;
         }
 
@@ -348,6 +361,7 @@ void CommonCmds::cp(const std::vector<std::string>& srcs, const std::string& dst
             // (otherwise infinite recursion and FS overflow).
             if (finalDst == src || finalDst.rfind(src + "/", 0) == 0) {
                 emit("cp: cannot copy a directory into itself: " + Helpers::clearFilename(src) + "\n");
+                Helpers::cmd_status = 1;
                 continue;
             }
             copy_recursive(src, finalDst, emit);
@@ -376,6 +390,7 @@ void CommonCmds::date(const std::string& outputFile, bool append, LineCallback e
         File file = Helpers::fsOpen(outFile, append ? "a" : "w");
         if (!file) {
             emit("date: cannot write to " + Helpers::clearFilename(outFile) + "\n");
+            Helpers::cmd_status = 1;
             return;
         }
 
@@ -410,6 +425,7 @@ void CommonCmds::echo(const std::string& text, const std::string& outputFile, bo
         File file = Helpers::fsOpen(outFile, append ? "a" : "w");
         if (!file) {
             emit("echo: cannot write to " + Helpers::clearFilename(outFile) + "\n");
+            Helpers::cmd_status = 1;
             return;
         }
 
@@ -430,6 +446,7 @@ void CommonCmds::ls(const std::string& currentDir, bool showAll, size_t maxShown
     File root = Helpers::fsOpen(currentDir, "r");
     if (!root || !root.isDirectory()) {
         emit("FS Error: Can't open directory\n");
+        Helpers::cmd_status = 1;
         return;
     }
 
@@ -522,6 +539,7 @@ void CommonCmds::mkdir(const std::vector<std::string>& dirs, LineCallback emit) 
     for (const auto& dirname : dirs) {
         if (!Helpers::fsMkdir(dirname)) {
             emit("mkdir: failed to create " + Helpers::clearFilename(dirname) + "\n");
+            Helpers::cmd_status = 1;
         }
     }
 }
@@ -545,6 +563,7 @@ void CommonCmds::mv(const std::vector<std::string>& srcs, const std::string& dst
     // With several sources, dst MUST be a directory
     if (srcs.size() > 1 && !dstIsDir) {
         emit("mv: target '" + Helpers::clearFilename(dst) + "' is not a directory\n");
+        Helpers::cmd_status = 1;
         return;
     }
 
@@ -558,6 +577,7 @@ void CommonCmds::mv(const std::vector<std::string>& srcs, const std::string& dst
         File srcFile = Helpers::fsOpen(src, "r");
         if (!srcFile) {
             emit("mv: cannot open " + Helpers::clearFilename(src) + "\n");
+            Helpers::cmd_status = 1;
             continue;
         }
 
@@ -575,6 +595,7 @@ void CommonCmds::mv(const std::vector<std::string>& srcs, const std::string& dst
         // Guard: refuse to move a directory into itself or below itself.
         if (srcIsDir && (finalDst == src || finalDst.rfind(src + "/", 0) == 0)) {
             emit("mv: cannot move a directory into itself: " + Helpers::clearFilename(src) + "\n");
+            Helpers::cmd_status = 1;
             continue;
         }
 
@@ -591,15 +612,18 @@ void CommonCmds::mv(const std::vector<std::string>& srcs, const std::string& dst
             if (copy_recursive(src, finalDst, emit)) {
                 if (!remove_recursive(src, emit)) {
                     emit("mv: copied but failed to remove source " + Helpers::clearFilename(src) + "\n");
+                    Helpers::cmd_status = 1;
                 }
             } else {
                 emit("mv: failed to copy directory " + Helpers::clearFilename(src) + "\n");
+                Helpers::cmd_status = 1;
             }
         } else {
             // Single-file move
             if (copy_file(src, finalDst, emit)) {
                 if (!Helpers::fsRemove(src)) {
                     emit("mv: failed to remove " + Helpers::clearFilename(src) + "\n");
+                    Helpers::cmd_status = 1;
                 }
             }
         }
@@ -616,6 +640,7 @@ bool CommonCmds::remove_recursive(const std::string& path, LineCallback emit) {
     File p = Helpers::fsOpen(path, "r");
     if (!p) {
         emit("rm: cannot remove " + Helpers::clearFilename(path) + ": No such file or directory\n");
+        Helpers::cmd_status = 1;
         return false;
     }
 
@@ -624,6 +649,7 @@ bool CommonCmds::remove_recursive(const std::string& path, LineCallback emit) {
         p.close();
         if (!Helpers::fsRemove(path)) {
             emit("rm: cannot remove " + Helpers::clearFilename(path) + "\n");
+            Helpers::cmd_status = 1;
             return false;
         }
         return true;
@@ -645,6 +671,7 @@ bool CommonCmds::remove_recursive(const std::string& path, LineCallback emit) {
 
     if (!Helpers::fsRmdir(path)) {
         emit("rm: cannot remove directory " + Helpers::clearFilename(path) + "\n");
+        Helpers::cmd_status = 1;
         ok = false;
     }
     return ok;
@@ -675,11 +702,13 @@ void CommonCmds::rm(const std::vector<std::string>& files, bool recursive, LineC
 
         if (isDir) {
             emit("rm: cannot remove " + Helpers::clearFilename(filename) + ": Is a directory\n");
+            Helpers::cmd_status = 1;
             continue;
         }
 
         if (!Helpers::fsRemove(filename)) {
             emit("rm: cannot remove " + Helpers::clearFilename(filename) + ": No such file or directory\n");
+            Helpers::cmd_status = 1;
         }
     }
 }
@@ -695,6 +724,7 @@ void CommonCmds::rmdir(const std::string& command, LineCallback emit) {
     for (const auto& dirname : dirs) {
         if (!Helpers::fsRmdir(dirname)) {
             emit("rmdir: cannot remove " + Helpers::clearFilename(dirname) + ": No such file or directory\n");
+            Helpers::cmd_status = 1;
         }
     }
 }
@@ -713,6 +743,7 @@ void CommonCmds::touch(const std::string& command, LineCallback emit) {
             file.close();
         } else {
             emit("touch: failed to create " + Helpers::clearFilename(filename) + "\n");
+            Helpers::cmd_status = 1;
         }
     }   
 }
@@ -794,6 +825,7 @@ void CommonCmds::find(const std::string& startDir, const std::string& pattern,
         emit("... too many results (use find ... > file)\n");
     } else if (count == 0) {
         emit("find: no matches\n");
+        Helpers::cmd_status = 1;
     }
 }
 

@@ -11,7 +11,9 @@ shell-style globbing, and user variables - all driven from the device keyboard.
 - **Globbing:** `*` and `?` expand in every command (e.g. `rm *.log`, `cat *.md`)
 - **Variables:** `set NAME value` / `NAME=value`, expand as `$NAME` / `${NAME}`,
   persisted across reboots in `/.environment`
-- **Pipes & redirection:** `>`, `>>`, `| grep`
+- **Pipes, redirection & logic:** `>`, `>>`, `| grep`, and `&&` / `||` for
+  conditional chains (`cmd1 && cmd2` runs the second only if the first succeeded;
+  `cmd1 || cmd2` only if it failed) - works at the prompt and in scripts
 - **Storage:** mount/unmount microSD at `/sd`, `df`
 - **Wi-Fi & network:** scan, connect, `ping`, local network + port scan
 - **Downloads:** `wget <url> [-o path]` - fetch a file over HTTP/HTTPS (streamed to flash or `/sd`)
@@ -27,10 +29,19 @@ shell-style globbing, and user variables - all driven from the device keyboard.
   **delete** (folders recursively), and **create files and folders** on internal flash and
   `/sd`. Pass a `path` to expose only that subtree (e.g. `httpd start /docs`) -
   access is confined to it. `httpd stop` / `httpd status` to manage it.
-- **Startup script:** commands in `/.profile` run automatically at boot, one per
-  line, exactly as if typed (`#` comments and blank lines are ignored). Lives on
-  internal flash, so it's always available. Edit with `ed /.profile` and reboot to
-  apply. Handy for setting variables, `cd`-ing to a working dir, connecting to
+- **Scripts:** `sh [-v] <file> [args...]` runs a script - each line executed as a
+  command (`#` comments and blank lines ignored). By default only the commands'
+  output is shown; `-v` also echoes each command before it runs (like bash's `-v`).
+  Arguments after the file become positional parameters inside the script: `$1`,
+  `$2`, ... `$9` (use `${10}` and up), `$@` for all of them, `$#` for the count,
+  and `$0` for the script name. `$?` holds the exit status of the last command -
+  every command reports success (`0`) or failure (non-zero): a missing file,
+  a bad path, a failed `cd`, a download or Wi-Fi error all set a non-zero status,
+  and an unknown command gives `127`. This is the groundwork for conditional
+  execution. Scripts can call other scripts (depth-limited,
+  each with its own arguments). The same mechanism powers `/.profile`, which runs
+  automatically at boot - edit it with `ed /.profile` and reboot to apply.
+  Handy for setting variables, `cd`-ing to a working dir, connecting to
   Wi-Fi (`wf c <ssid>` then the password on the next line), or printing a banner.
 
 Type `help` on the device for the full list.

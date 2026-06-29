@@ -4,6 +4,7 @@
 void NetworkCmds::net_scan(LineCallback emit) {
     if (WiFi.status() != WL_CONNECTED) {
         emit("Not connected to WiFi\n");
+        Helpers::cmd_status = 1;
         return;
     }
 
@@ -85,6 +86,7 @@ void NetworkCmds::net_scan(LineCallback emit) {
 void NetworkCmds::net_scan_ports(const IPAddress ip, const std::vector<uint16_t>& ports, LineCallback emit) {
     if (WiFi.status() != WL_CONNECTED) {
         emit("Not connected to WiFi\n");
+        Helpers::cmd_status = 1;
         return;
     }
 
@@ -113,6 +115,7 @@ void NetworkCmds::net_scan_ports(const IPAddress ip, const std::vector<uint16_t>
 
     if (openCount == 0) {
         emit("No open ports\n");
+        Helpers::cmd_status = 1;
     }
 
     snprintf(buffer, sizeof(buffer), "Scan complete (%d open)\n", openCount);
@@ -146,12 +149,14 @@ static std::string ping_extract_host(const std::string& target) {
 void NetworkCmds::ping(const std::string& target, uint8_t count, LineCallback emit) {
     if (WiFi.status() != WL_CONNECTED) {
         emit("Not connected to WiFi\n");
+        Helpers::cmd_status = 1;
         return;
     }
 
     std::string host = ping_extract_host(target);
     if (host.empty()) {
         emit("ping: invalid target\n");
+        Helpers::cmd_status = 1;
         return;
     }
 
@@ -161,6 +166,7 @@ void NetworkCmds::ping(const std::string& target, uint8_t count, LineCallback em
     if (!isIP) {
         if (!WiFi.hostByName(host.c_str(), ip) || ip == IPAddress(0, 0, 0, 0)) {
             emit("ping: cannot resolve " + host + "\n");
+            Helpers::cmd_status = 1;
             return;
         }
     }
@@ -197,6 +203,8 @@ void NetworkCmds::ping(const std::string& target, uint8_t count, LineCallback em
     if (recv > 0) {
         snprintf(buf, sizeof(buf), "avg = %.1f ms\n", totalTime / recv);
         emit(buf);
+    } else {
+        Helpers::cmd_status = 1; // 100% loss = failure (like real ping)
     }
 }
 
@@ -232,12 +240,13 @@ void NetworkCmds::wget(const std::string& args, LineCallback emit) {
         if (toks[i] == "-o" && i + 1 < toks.size()) outPath = toks[++i];
         else if (url.empty() && toks[i][0] != '-') url = toks[i];
     }
-    if (url.empty()) { emit("Usage: wget <url> [-o <path>]\n"); return; }
-    if (WiFi.status() != WL_CONNECTED) { emit("Not connected to WiFi\n"); return; }
+    if (url.empty()) { emit("Usage: wget <url> [-o <path>]\n"); Helpers::cmd_status = 1; return; }
+    if (WiFi.status() != WL_CONNECTED) { emit("Not connected to WiFi\n"); Helpers::cmd_status = 1; return; }
 
     bool https = (url.rfind("https://", 0) == 0);
     if (!https && url.rfind("http://", 0) != 0) {
         emit("wget: URL must start with http:// or https://\n");
+        Helpers::cmd_status = 1;
         return;
     }
 
@@ -250,7 +259,7 @@ void NetworkCmds::wget(const std::string& args, LineCallback emit) {
     bool ok;
     if (https) { sclient.setInsecure(); ok = http.begin(sclient, url.c_str()); } // no cert check
     else { ok = http.begin(pclient, url.c_str()); }
-    if (!ok) { emit("wget: could not start request (bad URL?)\n"); return; }
+    if (!ok) { emit("wget: could not start request (bad URL?)\n"); Helpers::cmd_status = 1; return; }
 
     http.setUserAgent("hamsTerm/1.0");
     http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
@@ -261,12 +270,13 @@ void NetworkCmds::wget(const std::string& args, LineCallback emit) {
         char b[64];
         snprintf(b, sizeof(b), "wget: HTTP %d\n", code);
         emit(b);
+        Helpers::cmd_status = 1;
         http.end();
         return;
     }
 
     File f = Helpers::fsOpen(abs, "w");
-    if (!f) { emit("wget: cannot open output file\n"); http.end(); return; }
+    if (!f) { emit("wget: cannot open output file\n"); http.end(); Helpers::cmd_status = 1; return; }
 
     int total = http.getSize(); // >=0 if Content-Length known, -1 if chunked/unknown
     {
@@ -327,6 +337,7 @@ void NetworkCmds::wget(const std::string& args, LineCallback emit) {
         snprintf(b, sizeof(b), "wget: write failed after %d bytes (SD/network)\n",
                  written < 0 ? 0 : written);
         emit(b);
+        Helpers::cmd_status = 1;
         Helpers::fsRemove(abs); // drop the partial file
         return;
     }

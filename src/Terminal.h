@@ -23,6 +23,9 @@ private:
     std::string command = "";
     size_t cursorPos = 0;                  // edit cursor within `command` (0..len)
     int inputStartY = 0;                   // screen Y of the input line's first row
+    int scriptDepth = 0;                   // nesting depth of running scripts (sh)
+    int chainDepth = 0;                    // depth of &&/|| chain expansion
+    std::vector<std::string> scriptArgs;   // positional params: [0]=$0 (name), [1..]=$1..
     std::string prompt = ">";
     std::vector<std::string> history;
     int max_history = 100;
@@ -70,8 +73,8 @@ public:
         M5Cardputer.Display.setCursor(0, 0);
         M5Cardputer.Display.setFont(&fonts::efontCN_14);
         M5Cardputer.Display.setTextSize(1);
-        print_prompt();
-        run_profile(); // auto-run commands from /.profile, if present
+        run_profile();  // auto-run commands from /.profile first (if present)
+        print_prompt(); // then show the prompt, after any script output
     }
 
     // Run commands from /.profile (internal filesystem) at startup, one per
@@ -79,15 +82,37 @@ public:
     // or begin with '#' are skipped. Handy for setting variables, cd-ing to a
     // working dir, or connecting to Wi-Fi on boot.
     void run_profile() {
-        File f = Helpers::fsOpen("/.profile", "r");
-        if (!f) return;
+        run_script("/.profile", false, {"/.profile"}); // boot, silent, $0=/.profile
+    }
 
+    // Run a script file: execute each line as a command, skipping blank lines
+    // and '#' comments. When verbose, each command is echoed before it runs
+    // (like `sh -v`); otherwise only the commands' own output is shown. `args`
+    // are the positional parameters ([0]=$0 script name, [1..]=$1..$N), exposed
+    // to the script via $1, $@, $#, etc. Returns false if the file can't be
+    // opened. A depth guard stops a script that calls `sh` on itself from
+    // overflowing the stack; positional params are saved/restored so a nested
+    // script doesn't clobber its caller's arguments.
+    bool run_script(const std::string& path, bool verbose,
+                    const std::vector<std::string>& args) {
+        if (scriptDepth >= 8) {
+            print("sh: scripts nested too deep\n");
+            return true; // treat as handled, just refuse to go deeper
+        }
+        File f = Helpers::fsOpen(path.c_str(), "r");
+        if (!f) return false;
+        if (f.isDirectory()) { f.close(); return false; }
+
+        std::vector<std::string> savedArgs = scriptArgs; // save caller's params
+        scriptArgs = args;
+        scriptDepth++;
         std::string line;
-        auto runLine = [this](std::string ln) {
+        auto runLine = [this, verbose](std::string ln) {
             Helpers::trim(ln);
             if (ln.empty() || ln[0] == '#') return; // skip blanks and comments
-            M5Cardputer.Display.print(ln.c_str());  // echo as if typed
-            M5Cardputer.Display.println();
+            if (verbose) {                          // -v: echo into scrollback + screen
+                print(prompt + ln + "\n");
+            }
             command = ln;
             execute_command();
         };
@@ -100,6 +125,9 @@ public:
         }
         if (!line.empty()) runLine(line); // last line without a trailing newline
         f.close();
+        scriptDepth--;
+        scriptArgs = savedArgs; // restore caller's params
+        return true;
     }
 
     void add_to_history(const std::string& text) {
@@ -317,8 +345,12 @@ public:
     }
 
     // Print a fresh prompt for input and show the edit caret right after it.
-    // Used at every point that returns the user to the command line.
+    // Used at every point that returns the user to the command line. While a
+    // script is running (scriptDepth>0) this is a no-op: the per-line commands
+    // must not draw prompts; only the outer `sh ...` command prints one when the
+    // script finishes (by which point scriptDepth is back to 0).
     void print_prompt() {
+        if (scriptDepth > 0 || chainDepth > 0) return;
         M5Cardputer.Display.print(prompt.c_str());
         inputStartY = M5Cardputer.Display.getCursorY();
         draw_caret();
@@ -397,6 +429,7 @@ public:
     void start_telnet(const std::string& host, uint16_t port, bool raw) {
         if (WiFi.status() != WL_CONNECTED) {
             print("Not connected to WiFi\n");
+            Helpers::cmd_status = 1;
             print_prompt();
             return;
         }
@@ -404,6 +437,7 @@ public:
         telnet = new TelnetSession(raw); // raw = nc (no telnet negotiation)
         if (!telnet->begin(host, port)) {
             print("telnet: connection failed\n");
+            Helpers::cmd_status = 1;
             delete telnet;
             telnet = nullptr;
             print_prompt();
@@ -469,9 +503,9 @@ public:
         // optional bare port as second positional
         if (positional.size() >= 2) { long v; if (parse_uint(positional[1], v) && v >= 1 && v <= 65535) port = (uint16_t)v; }
 
-        if (host.empty()) { print("ssh: no host\n"); print_prompt(); return; }
-        if (user.empty()) { print("ssh: no user (use user@host or -l user)\n"); print_prompt(); return; }
-        if (WiFi.status() != WL_CONNECTED) { print("Not connected to WiFi\n"); print_prompt(); return; }
+        if (host.empty()) { print("ssh: no host\n"); Helpers::cmd_status = 1; print_prompt(); return; }
+        if (user.empty()) { print("ssh: no user (use user@host or -l user)\n"); Helpers::cmd_status = 1; print_prompt(); return; }
+        if (WiFi.status() != WL_CONNECTED) { print("Not connected to WiFi\n"); Helpers::cmd_status = 1; print_prompt(); return; }
 
         sshUser = user; sshHost = host; sshPort = port;
         sshWaitingForPass = true;
@@ -485,6 +519,7 @@ public:
         ssh = new SshSession();
         if (!ssh->begin(sshHost, sshUser, password, sshPort)) {
             print(ssh->error() + std::string("\n"));
+            Helpers::cmd_status = 1;
             delete ssh; ssh = nullptr;
             print_prompt();
             return;
@@ -639,7 +674,9 @@ public:
     // Expand $NAME and ${NAME} against the given variables. Undefined names
     // expand to an empty string (like a typical shell). "\$" yields a literal $.
     static std::string expand_vars(const std::string& in,
-                                   const std::map<std::string, std::string>& vars) {
+                                   const std::map<std::string, std::string>& vars,
+                                   const std::vector<std::string>& args,
+                                   int status) {
         std::string out;
         out.reserve(in.size());
         size_t i = 0;
@@ -652,6 +689,59 @@ public:
                 size_t j = i + 1;
                 bool braced = false;
                 if (j < in.size() && in[j] == '{') { braced = true; j++; }
+
+                // $? - exit status of the last command.
+                if (j < in.size() && in[j] == '?') {
+                    size_t after = j + 1;
+                    if (braced) {
+                        if (after < in.size() && in[after] == '}') after++;
+                        else { out += c; i++; continue; } // malformed ${?
+                    }
+                    out += std::to_string(status);
+                    i = after; continue;
+                }
+
+                // Special params: $# (arg count), $@ / $* (all args, space-joined).
+                if (j < in.size() && (in[j] == '#' || in[j] == '@' || in[j] == '*')) {
+                    char sp = in[j];
+                    size_t after = j + 1;
+                    if (braced) {
+                        if (after < in.size() && in[after] == '}') after++;
+                        else { out += c; i++; continue; } // malformed ${#
+                    }
+                    if (sp == '#') {
+                        size_t n = args.empty() ? 0 : args.size() - 1;
+                        out += std::to_string(n);
+                    } else { // @ or * : args 1..N joined by spaces
+                        for (size_t k = 1; k < args.size(); ++k) {
+                            if (k > 1) out += ' ';
+                            out += args[k];
+                        }
+                    }
+                    i = after; continue;
+                }
+
+                // Positional params: $0,$1,...  (single digit unless braced ${12}).
+                if (j < in.size() && in[j] >= '0' && in[j] <= '9') {
+                    size_t idx = 0;
+                    if (braced) {
+                        size_t ds = j;
+                        while (j < in.size() && in[j] >= '0' && in[j] <= '9') {
+                            idx = idx * 10 + (size_t)(in[j] - '0'); j++;
+                        }
+                        if (j < in.size() && in[j] == '}' && j > ds) {
+                            if (idx < args.size()) out += args[idx];
+                            i = j + 1; continue;
+                        }
+                        out += c; i++; continue; // malformed ${N
+                    } else {
+                        idx = (size_t)(in[j] - '0'); // exactly one digit
+                        if (idx < args.size()) out += args[idx];
+                        i = j + 1; continue;
+                    }
+                }
+
+                // Named variables: $NAME / ${NAME}
                 size_t nameStart = j;
                 std::string name;
                 while (j < in.size()) {
@@ -716,6 +806,16 @@ public:
         f.close();
     }
 
+    // Strip one layer of surrounding matching quotes from a value:
+    //   name="Alex"  -> Alex      age='25' -> 25      age=25 -> 25
+    // Only strips when the whole value is wrapped in the same quote char.
+    static std::string unquote_value(std::string v) {
+        if (v.size() >= 2 && (v.front() == '"' || v.front() == '\'') && v.back() == v.front()) {
+            v = v.substr(1, v.size() - 2);
+        }
+        return v;
+    }
+
     // Handle set / unset / NAME=value. Returns true if the line was a variable
     // command (and was handled here).
     bool handle_var_command(const std::string& cmd, LineCallback emit) {
@@ -731,8 +831,8 @@ public:
             std::string name = (sp == std::string::npos) ? rest : rest.substr(0, sp);
             std::string value = (sp == std::string::npos) ? "" : rest.substr(sp + 1);
             Helpers::trim(value);
-            if (!valid_var_name(name)) { emit("set: invalid name: " + name + "\n"); return true; }
-            vars[name] = value;
+            if (!valid_var_name(name)) { emit("set: invalid name: " + name + "\n"); Helpers::cmd_status = 1; return true; }
+            vars[name] = unquote_value(value);
             save_vars();
             return true;
         }
@@ -747,12 +847,75 @@ public:
         if (eq != std::string::npos && eq > 0) {
             std::string name = cmd.substr(0, eq);
             if (name.find(' ') == std::string::npos && valid_var_name(name)) {
-                vars[name] = cmd.substr(eq + 1);
+                vars[name] = unquote_value(cmd.substr(eq + 1));
                 save_vars();
                 return true;
             }
         }
         return false;
+    }
+
+    // One segment of an &&/|| chain, with the operator that PRECEDES it.
+    enum class ChainOp { NONE, AND, OR };
+    struct ChainSeg { ChainOp op; std::string text; };
+
+    // Split a command line at top-level && and || operators, honoring quotes
+    // (so "echo a && b" inside quotes is not split) and leaving single | (pipes)
+    // intact within a segment (|| has lower precedence than |). Each segment
+    // carries the operator that came before it; the first segment's op is NONE.
+    static std::vector<ChainSeg> split_and_or(const std::string& in) {
+        std::vector<ChainSeg> out;
+        std::string cur;
+        ChainOp pending = ChainOp::NONE;
+        char quote = 0;
+        size_t i = 0;
+        while (i < in.size()) {
+            char c = in[i];
+            if (quote) {
+                cur += c;
+                if (c == quote) quote = 0;
+                i++; continue;
+            }
+            if (c == '"' || c == '\'') { quote = c; cur += c; i++; continue; }
+            if ((c == '&' && i + 1 < in.size() && in[i + 1] == '&') ||
+                (c == '|' && i + 1 < in.size() && in[i + 1] == '|')) {
+                std::string seg = cur; Helpers::trim(seg);
+                out.push_back({pending, seg});
+                pending = (c == '&') ? ChainOp::AND : ChainOp::OR;
+                cur.clear();
+                i += 2; continue;
+            }
+            cur += c; i++;
+        }
+        std::string seg = cur; Helpers::trim(seg);
+        out.push_back({pending, seg});
+        return out;
+    }
+
+    // Usage hint for a command name typed with no arguments. Returns "" if the
+    // bare word isn't a known command that requires arguments. Used so that e.g.
+    // typing just "cat" shows its usage (and fails) instead of "Unknown command".
+    static std::string usage_for(const std::string& c) {
+        if (c == "cat")    return "Usage: cat <file>...\n";
+        if (c == "head")   return "Usage: head [-n N] <file>...\n";
+        if (c == "tail")   return "Usage: tail [-n N] <file>...\n";
+        if (c == "find")   return "Usage: find [path] <name|pattern>\n";
+        if (c == "ssh")    return "Usage: ssh [user@]host [port]\n";
+        if (c == "telnet") return "Usage: telnet <host> [port]\n";
+        if (c == "nc")     return "Usage: nc <host> <port>\n";
+        if (c == "edit" || c == "ed") return "Usage: edit <file>\n";
+        if (c == "cp")     return "Usage: cp [-r] <source...> <destination>\n";
+        if (c == "mkdir")  return "Usage: mkdir <dir>...\n";
+        if (c == "mv")     return "Usage: mv <source...> <destination>\n";
+        if (c == "rm")     return "Usage: rm [-r] <file>...\n";
+        if (c == "rmdir")  return "Usage: rmdir <dir>...\n";
+        if (c == "touch")  return "Usage: touch <file>...\n";
+        if (c == "unset")  return "Usage: unset <NAME>\n";
+        if (c == "ping")   return "Usage: ping <host|ip|url> [count]\n";
+        if (c == "wget")   return "Usage: wget <url> [-o <path>]\n";
+        if (c == "wf c")   return "Usage: wf c <ssid> [-p <password>]\n";
+        if (c == "net s p")return "Usage: net s p <ip> <port|a-b>...\n";
+        return "";
     }
 
     void execute_command() {
@@ -773,9 +936,13 @@ public:
             return;
         }
 
-        // Echo the entered command into the screen history (shown as typed,
-        // including "> file").
-        add_to_history(prompt + cmd);
+        // Echo the entered command into the screen scrollback (shown as typed,
+        // including "> file"). Skipped while a script is running: the script's
+        // commands must not fill the scrollback or the recall history - only
+        // their output (and, in -v mode, the echo from run_script) is kept.
+        if (scriptDepth == 0 && chainDepth == 0) {
+            add_to_history(prompt + cmd);
+        }
 
         if (WiFiCmds::waitingForPass) {
             WiFiCmds::wifi_connect_with_pass(cmd, emit);
@@ -789,9 +956,10 @@ public:
             return; // ssh_connect_with_pass prints the prompt on failure
         }
 
-        // Record the command in history (no consecutive duplicates).
-        // Passwords (handled above) never reach here.
-        if (cmdHistory.empty() || cmdHistory.back() != cmd) {
+        // Record the command in the recall history (no consecutive duplicates).
+        // Passwords (handled above) never reach here. Script commands are not
+        // recorded - only the `sh ...` line the user typed is.
+        if (scriptDepth == 0 && chainDepth == 0 && (cmdHistory.empty() || cmdHistory.back() != cmd)) {
             cmdHistory.push_back(cmd);
             while ((int)cmdHistory.size() > max_cmd_history) {
                 cmdHistory.erase(cmdHistory.begin());
@@ -800,9 +968,40 @@ public:
         historyIndex = (int)cmdHistory.size();
         savedLine = "";
 
-        // Expand $NAME / ${NAME} from user variables before anything else, so
-        // they work in every command (and in redirect targets, paths, etc.).
-        cmd = expand_vars(cmd, vars);
+        // --- &&/|| short-circuit chains ---
+        // Split the line at top-level && / || and run the segments with bash
+        // short-circuit semantics driven by $? (Helpers::cmd_status). Done before
+        // expansion so each segment expands its own $? independently, and works
+        // the same at the prompt and inside scripts. The whole line was already
+        // echoed/recorded above; segments run with chainDepth>0 so they don't
+        // re-echo, re-record, or print their own prompts.
+        if (chainDepth == 0) {
+            auto segs = split_and_or(cmd);
+            if (segs.size() > 1) {
+                chainDepth++;
+                bool prevOk = true;
+                for (size_t i = 0; i < segs.size(); ++i) {
+                    if (segs[i].text.empty()) continue; // skip dangling operators
+                    if (i > 0) {
+                        if (segs[i].op == ChainOp::AND && !prevOk) continue;
+                        if (segs[i].op == ChainOp::OR  &&  prevOk) continue;
+                    }
+                    command = segs[i].text;
+                    execute_command();                    // run one segment
+                    prevOk = (Helpers::cmd_status == 0);
+                }
+                chainDepth--;
+                print_prompt();
+                return;
+            }
+        }
+
+        // Expand $NAME / ${NAME}, positional args and $? (last exit status)
+        // before anything else. $? must read the PREVIOUS command's status, so
+        // we expand first and only then reset it to 0 (success) for this command;
+        // a command that fails sets Helpers::cmd_status back to non-zero.
+        cmd = expand_vars(cmd, vars, scriptArgs, Helpers::cmd_status);
+        Helpers::cmd_status = 0;
 
         // Variable management (set / unset / NAME=value) is handled here,
         // before the pipeline and glob machinery.
@@ -854,6 +1053,7 @@ public:
             redirectAppend = app;
         } else {
             bool selfHandles = (cmd.rfind("cat ", 0) == 0 ||
+                                cmd == "echo" ||
                                 cmd.rfind("echo ", 0) == 0 ||
                                 cmd == "date" ||
                                 cmd.rfind("date ", 0) == 0 ||
@@ -930,12 +1130,16 @@ public:
                 auto files = Helpers::parse_parts(args);
                 if (files.empty()) {
                     emit("cat: missing file operand\n");
+                    Helpers::cmd_status = 1;
                     return;
                 }
                 CommonCmds::cat(files, file, append, emit);
             }
             else if (cmd.substr(0, 3) == "cd ") {
                 CommonCmds::cd(cmd.substr(3), emit);
+            }
+            else if (cmd == "cd") {
+                CommonCmds::cd("/", emit); // bare cd -> home (root)
             }
             else if (cmd.rfind("head ", 0) == 0 || cmd.rfind("tail ", 0) == 0) {
                 // head/tail [-n N | -N] <file>...   (default 10 lines)
@@ -965,6 +1169,7 @@ public:
 
                 if (names.empty()) {
                     emit(std::string("Usage: ") + (isHead ? "head" : "tail") + " [-n N] <file>...\n");
+                    Helpers::cmd_status = 1;
                     return;
                 }
 
@@ -983,11 +1188,9 @@ public:
                 // find <name|pattern>          - search from the current directory
                 // find <path> <name|pattern>   - search from the given directory
                 // Pattern: * and ? are glob; without them, substring search.
+                // Bare "find" is handled by usage_for(); reaching here means the
+                // command had arguments, so split_ws yields at least one token.
                 auto toks = split_ws(cmd.substr(5));
-                if (toks.empty()) {
-                    emit("Usage: find [path] <name|pattern>\n");
-                    return;
-                }
                 std::string start, pattern;
                 if (toks.size() == 1) {
                     start = Helpers::currentDir;
@@ -1006,11 +1209,8 @@ public:
             }
             else if (cmd.rfind("telnet ", 0) == 0) {
                 // telnet <host> [port]   (default port 23)
+                // Bare "telnet" -> usage_for(); here there is always a host token.
                 auto toks = split_ws(cmd.substr(7));
-                if (toks.empty()) {
-                    emit("Usage: telnet <host> [port]\n");
-                    return;
-                }
                 uint16_t port = 23;
                 if (toks.size() >= 2) {
                     long p;
@@ -1024,11 +1224,13 @@ public:
                 auto toks = split_ws(cmd.substr(3));
                 if (toks.size() < 2) {
                     emit("Usage: nc <host> <port>\n");
+                    Helpers::cmd_status = 1;
                     return;
                 }
                 long p;
                 if (!parse_uint(toks[1], p) || p < 1 || p > 65535) {
                     emit("nc: invalid port\n");
+                    Helpers::cmd_status = 1;
                     return;
                 }
                 start_telnet(toks[0], (uint16_t)p, true);
@@ -1036,12 +1238,26 @@ public:
             }
             else if (cmd.rfind("edit ", 0) == 0 || cmd.rfind("ed ", 0) == 0) {
                 bool isEdit = (cmd.rfind("edit ", 0) == 0);
+                // Bare "edit"/"ed" -> usage_for(); here there is always a file token.
                 auto toks = split_ws(cmd.substr(isEdit ? 5 : 3));
-                if (toks.empty()) {
-                    emit("Usage: edit <file>\n");
-                    return;
+                std::string target = Helpers::make_absolute(toks[0]);
+                // The editor cannot create directories, so refuse a path whose
+                // parent directory doesn't exist (otherwise the file silently
+                // fails to save). Files directly under root are always allowed.
+                size_t slash = target.find_last_of('/');
+                std::string parent = (slash == std::string::npos || slash == 0)
+                                     ? "/" : target.substr(0, slash);
+                if (parent != "/") {
+                    File pd = Helpers::fsOpen(parent);
+                    bool ok = pd && pd.isDirectory();
+                    if (pd) pd.close();
+                    if (!ok) {
+                        emit("edit: " + parent + ": No such directory\n");
+                        Helpers::cmd_status = 1;
+                        return;
+                    }
                 }
-                start_editor(Helpers::make_absolute(toks[0]));
+                start_editor(target);
                 return; // editor took over the screen, don't print the prompt
             }
             else if (cmd == "help") {
@@ -1071,6 +1287,7 @@ public:
                 }
                 if (files.size() < 2) {
                     emit("Usage: cp [-r] <source...> <destination>\n");
+                    Helpers::cmd_status = 1;
                     return;
                 }
                 std::string dst = files.back();
@@ -1088,10 +1305,10 @@ public:
                 parse_redirect(body, textIgnored, file, append);
                 CommonCmds::date(file, append, emit);
             }
-            else if (cmd.substr(0, 5) == "echo ") {
+            else if (cmd == "echo" || cmd.substr(0, 5) == "echo ") {
                 std::string text, file;
                 bool append;
-                parse_redirect(cmd.substr(5), text, file, append);
+                parse_redirect(cmd.size() > 5 ? cmd.substr(5) : "", text, file, append);
                 // If the text uses quotes, collapse them (quote-aware): the
                 // quoted runs keep their spaces, the quote chars are removed.
                 if (text.find('"') != std::string::npos || text.find('\'') != std::string::npos) {
@@ -1136,17 +1353,15 @@ public:
                 Helpers::umountSD(emit);
             }
             else if (cmd.substr(0, 6) == "mkdir ") {
+                // Bare "mkdir" -> usage_for(); here parse_parts yields >=1 dir.
                 auto dirs = Helpers::parse_parts(cmd.substr(6));
-                if (dirs.empty()) {
-                    emit("mkdir: missing file operand\n");
-                    return;
-                }
                 CommonCmds::mkdir(dirs, emit);
             }
             else if (cmd.substr(0, 3) == "mv ") {
                 auto files = Helpers::parse_parts(cmd.substr(3));
                 if (files.size() < 2) {
                     emit("Usage: mv <source...> <destination>\n");
+                    Helpers::cmd_status = 1;
                     return;
                 }
                 std::string dst = files.back();
@@ -1165,6 +1380,11 @@ public:
                         recursive = true;
                     else
                         files.push_back(Helpers::make_absolute(t));
+                }
+                if (files.empty()) { // e.g. "rm -r" with no path given
+                    emit("rm: missing operand\n");
+                    Helpers::cmd_status = 1;
+                    return;
                 }
                 CommonCmds::rm(files, recursive, emit);
             }
@@ -1196,10 +1416,11 @@ public:
                 if (action == "stop") WiFiCmds::ap_stop(emit);
                 else if (action == "status" || (action.empty() && !haveS)) WiFiCmds::ap_status(emit);
                 else if (action == "start") {
-                    if (!haveS) emit("Usage: ap -s <ssid> [-p <password>] start\n");
+                    if (!haveS) { emit("Usage: ap -s <ssid> [-p <password>] start\n"); Helpers::cmd_status = 1; }
                     else WiFiCmds::ap_start(ssid, pass, emit);
                 } else {
                     emit("Usage: ap -s <ssid> [-p <password>] start | ap stop | ap status\n");
+                    Helpers::cmd_status = 1;
                 }
             }
             else if (cmd == "net s") {
@@ -1210,6 +1431,7 @@ public:
             }
             else if (cmd == "wget") {
                 emit("Usage: wget <url> [-o <path>]\n");
+                Helpers::cmd_status = 1;
             }
             else if (cmd == "httpd" || cmd.rfind("httpd ", 0) == 0) {
                 HttpdCmds::httpd(cmd.size() > 5 ? cmd.substr(6) : "", emit);
@@ -1219,16 +1441,43 @@ public:
                 delay(300);
                 ESP.restart();
             }
+            else if (cmd == "sh" || cmd.rfind("sh ", 0) == 0) {
+                // sh [-v] <file> [args...] - run a script: each line executed as a
+                // command, blank lines and '#' comments skipped. Silent by default;
+                // -v echoes each command. Tokens after <file> become positional
+                // params $1..$N (also $@, $#); $0 is the script name as given.
+                std::string rest = (cmd.size() > 3) ? cmd.substr(3) : "";
+                bool verbose = false;
+                bool haveFile = false;
+                std::string file;
+                std::vector<std::string> args; // [0]=$0 (file), [1..]=positional
+                for (const auto& t : split_ws(rest)) {     // raw tokens
+                    if (!haveFile) {
+                        if (t == "-v") { verbose = true; continue; } // flags precede file
+                        file = t; haveFile = true;
+                        args.push_back(t);                  // $0 = name as given
+                    } else {
+                        args.push_back(t);                  // $1, $2, ...
+                    }
+                }
+                if (!haveFile) {
+                    emit("Usage: sh [-v] <file> [args...]\n");
+                    Helpers::cmd_status = 1;
+                } else {
+                    std::string path = Helpers::make_absolute(file);
+                    if (!run_script(path, verbose, args)) {
+                        emit("sh: cannot open " + path + "\n");
+                        Helpers::cmd_status = 1;
+                    }
+                }
+            }
             else if (cmd.rfind("ping ", 0) == 0) {
                 // ping <host|ip|url> [count]
                 //   ping https://www.google.com
                 //   ping 192.168.0.185
                 //   ping google.com 8
+                // Bare "ping" -> usage_for(); here there is always a target token.
                 auto toks = split_ws(cmd.substr(5));
-                if (toks.empty()) {
-                    emit("Usage: ping <host|ip|url> [count]\n");
-                    return;
-                }
                 uint8_t count = 4;
                 if (toks.size() >= 2) {
                     long c;
@@ -1247,12 +1496,14 @@ public:
 
                 if (tokens.size() < 2) {
                     emit("Usage: net s p <ip> <port|a-b>...\n");
+                    Helpers::cmd_status = 1;
                     return;
                 }
 
                 IPAddress ip;
                 if (!ip.fromString(String(tokens[0].c_str()))) {
                     emit("Invalid IP address\n");
+                    Helpers::cmd_status = 1;
                     return;
                 }
 
@@ -1303,11 +1554,19 @@ public:
                 NetworkCmds::net_scan_ports(ip, ports, emit);
             }
             else {
-                emit("Unknown command: " + cmd + "\n");
+                std::string usage = usage_for(cmd);
+                if (!usage.empty()) {
+                    emit(usage); // a known command typed without its arguments
+                    Helpers::cmd_status = 1;
+                } else {
+                    emit("Unknown command: " + cmd + "\n");
+                    Helpers::cmd_status = 127; // bash convention for "command not found"
+                }
             }
         }
         catch (...) {
             emit("Execution error\n");
+            Helpers::cmd_status = 1;
         }
 
         // Flush the last grep line without a trailing '\n'

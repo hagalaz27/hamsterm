@@ -28,6 +28,10 @@ class Helpers {
 
     // --- microSD mount point ---
     static bool sdMounted;
+
+    // Exit status of the last executed command (0 = success), exposed to scripts
+    // and the prompt as $?. Commands set this on failure; reset to 0 per command.
+    static int cmd_status;
     static const char* SD_MOUNT; // "/sd"
 
     // Whether an absolute path points to SD ("/sd" or "/sd/...").
