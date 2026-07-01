@@ -11,6 +11,27 @@ shell-style globbing, and user variables - all driven from the device keyboard.
 - **Globbing:** `*` and `?` expand in every command (e.g. `rm *.log`, `cat *.md`)
 - **Variables:** `set NAME value` / `NAME=value`, expand as `$NAME` / `${NAME}`,
   persisted across reboots in `/.environment`
+- **Conditions & if:** `test EXPR` / `[ EXPR ]` set `$?` for use with `&&`/`||`
+  and `if`: file tests `-e` `-f` `-d` `-s`, string tests `-z` `-n` `=` `!=`,
+  numeric `-eq` `-ne` `-lt` `-le` `-gt` `-ge`, and a leading `!` to negate -
+  e.g. `[ -f /config ] && sh /setup.sh`
+- **if / elif / else / fi:** conditional blocks in scripts (and as a single line
+  at the prompt: `if [ -d /sd ]; then ls /sd; else echo no SD; fi`). The condition
+  is any command - its exit status picks the branch. Blocks nest, and `elif`
+  chains alternatives.
+- **Loops:** `while C; do ...; done` (repeat while C is true), `until C; do ...; done` 
+  (until C becomes true), and `for x in LIST; do ...; done` (LIST is words,
+  with `$vars`, numeric ranges `{1..5}` / `{0..10..2}`, and `*` globs expanded).
+  Loops nest with each other and with `if`. Press **Ctrl+C** to break a running
+  loop.
+- **Brace ranges:** `{N..M}` and `{N..M..STEP}` expand to a numeric sequence
+  anywhere on the line (`echo {1..5}`, `touch f{1..3}.txt`, counts down with
+  `{5..1}`). Expanded after variables, so `{1..$n}` works too. Non-numeric or
+  oversized ranges are left as-is.
+- **Arithmetic:** `$(( EXPR ))` evaluates integer math with `+ - * / %`,
+  parentheses, unary minus and variables (`$((i+1))`, `$(((a+b)*2))`). Inside the
+  parentheses a bare name means that variable. Enables counters in loops:
+  `i=$((i+1))`. Division/modulo by zero yields 0.
 - **Pipes, redirection & logic:** `>`, `>>`, `| grep`, and `&&` / `||` for
   conditional chains (`cmd1 && cmd2` runs the second only if the first succeeded;
   `cmd1 || cmd2` only if it failed) - works at the prompt and in scripts

@@ -51,6 +51,14 @@ void SystemCmds::help(LineCallback emit) {
     emit("Pipe:  cmd > f | cmd >> f\n");
     emit("       cmd | grep <text>\n");
     emit("       a && b | a || b\n");
+    emit("Test:  [ -f x ] [ a = b ]\n");
+    emit("Flow:  if C; then ...; fi\n");
+    emit("       while C; do ...; done\n");
+    emit("       for x in ...; do ...; done\n");
+    emit("Range: {1..5} {0..10..2}\n");
+    emit("Math:  $((i+1)) + - * / %\n");
+    emit("       -e -f -d -s -z -n\n");
+    emit("       = != -eq -lt -gt ...\n");
     emit("Keys:  Tab=complete\n");
     emit("       Fn+;/. = history\n");
     emit("       Fn+,// = cursor\n");

@@ -914,6 +914,91 @@ std::vector<std::string> CommonCmds::expand_token(const std::string& tok) {
     return m;
 }
 
+// Strict signed-integer parse for brace ranges (whole string must be an int).
+static bool brace_int(const std::string& s, long& out) {
+    if (s.empty()) return false;
+    size_t i = (s[0] == '-' || s[0] == '+') ? 1 : 0;
+    if (i == s.size()) return false;
+    for (size_t k = i; k < s.size(); k++)
+        if (s[k] < '0' || s[k] > '9') return false;
+    out = strtol(s.c_str(), nullptr, 10);
+    return true;
+}
+
+// Expand one word containing a single numeric brace range {N..M} or {N..M..S}.
+// Any prefix/suffix around the brace is kept on each element. Returns {word}
+// unchanged when there is no valid range, a nested brace, or the result would
+// be too large (memory guard for the device).
+static std::vector<std::string> expand_brace_word(const std::string& word) {
+    const size_t MAXBRACE = 1024;
+    char q = 0; size_t open = std::string::npos;
+    for (size_t i = 0; i < word.size(); i++) {
+        char c = word[i];
+        if (q) { if (c == q) q = 0; continue; }
+        if (c == '"' || c == '\'') { q = c; continue; }
+        if (c == '{') { open = i; break; }
+    }
+    if (open == std::string::npos) return { word };
+
+    q = 0; size_t close = std::string::npos;
+    for (size_t i = open + 1; i < word.size(); i++) {
+        char c = word[i];
+        if (q) { if (c == q) q = 0; continue; }
+        if (c == '"' || c == '\'') { q = c; continue; }
+        if (c == '{') return { word };       // nested brace -> leave literal
+        if (c == '}') { close = i; break; }
+    }
+    if (close == std::string::npos) return { word };
+
+    std::string inside = word.substr(open + 1, close - open - 1);
+    size_t d1 = inside.find("..");
+    if (d1 == std::string::npos) return { word };
+    std::string sa = inside.substr(0, d1);
+    std::string rest = inside.substr(d1 + 2);
+    size_t d2 = rest.find("..");
+    std::string sb = (d2 == std::string::npos) ? rest : rest.substr(0, d2);
+    std::string sc = (d2 == std::string::npos) ? std::string() : rest.substr(d2 + 2);
+
+    long start, end, step = 1;
+    if (!brace_int(sa, start) || !brace_int(sb, end)) return { word };
+    if (!sc.empty() && (!brace_int(sc, step) || step <= 0)) return { word };
+
+    long span = (start <= end) ? (end - start) : (start - end);
+    if ((size_t)(span / step) + 1 > MAXBRACE) return { word }; // too large
+
+    std::string prefix = word.substr(0, open);
+    std::string suffix = word.substr(close + 1);
+    std::vector<std::string> out;
+    if (start <= end)
+        for (long v = start; v <= end; v += step)
+            out.push_back(prefix + std::to_string(v) + suffix);
+    else
+        for (long v = start; v >= end; v -= step)
+            out.push_back(prefix + std::to_string(v) + suffix);
+    return out;
+}
+
+std::string CommonCmds::expand_braces(const std::string& cmdline) {
+    if (cmdline.find('{') == std::string::npos) return cmdline; // fast path
+    std::string out, word; char q = 0; bool first = true;
+    auto flush = [&](const std::string& w) {
+        for (const auto& e : expand_brace_word(w)) {
+            if (!first) out += " ";
+            first = false;
+            out += e;
+        }
+    };
+    for (size_t i = 0; i < cmdline.size(); i++) {
+        char ch = cmdline[i];
+        if (q) { word += ch; if (ch == q) q = 0; continue; }
+        if (ch == '"' || ch == '\'') { q = ch; word += ch; continue; }
+        if (ch == ' ' || ch == '\t') { if (!word.empty()) { flush(word); word.clear(); } continue; }
+        word += ch;
+    }
+    if (!word.empty()) flush(word);
+    return out;
+}
+
 std::string CommonCmds::expand_globs(const std::string& cmdline) {
     // Quote-aware tokenizing: each token carries whether it had an UNQUOTED
     // glob char. Only such tokens are expanded; quotes suppress globbing.

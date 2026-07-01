@@ -44,6 +44,11 @@ public:
     // filesystem. Used so every command (not just find) understands globs.
     static std::string expand_globs(const std::string& cmdline);
 
+    // Expand numeric brace ranges {N..M} and {N..M..S} (with optional prefix and
+    // suffix on the word), honoring quotes. Non-numeric or malformed braces are
+    // left literal. Oversized ranges are left literal to protect memory.
+    static std::string expand_braces(const std::string& cmdline);
+
 private:
     static std::vector<std::string> expand_token(const std::string& tok);
     // Multi-component glob: expand a (possibly absolute) pattern whose '*'/'?'

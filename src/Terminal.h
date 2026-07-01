@@ -81,6 +81,332 @@ public:
     // line, exactly as if each were typed at the prompt. Lines that are empty
     // or begin with '#' are skipped. Handy for setting variables, cd-ing to a
     // working dir, or connecting to Wi-Fi on boot.
+    // ---- Script control flow: if / then / elif / else / fi, loops ----
+    enum class ScriptKw { NONE, IF, THEN, ELIF, ELSE, FI,
+                          WHILE, UNTIL, FOR, DO, DONE };
+
+    // Classify a (flattened) logical line by its first word.
+    static ScriptKw script_kw(const std::string& line) {
+        size_t a = line.find_first_not_of(" \t");
+        if (a == std::string::npos) return ScriptKw::NONE;
+        size_t b = line.find_first_of(" \t", a);
+        std::string w = line.substr(a, (b == std::string::npos ? line.size() : b) - a);
+        if (w == "if")    return ScriptKw::IF;
+        if (w == "then")  return ScriptKw::THEN;
+        if (w == "elif")  return ScriptKw::ELIF;
+        if (w == "else")  return ScriptKw::ELSE;
+        if (w == "fi")    return ScriptKw::FI;
+        if (w == "while") return ScriptKw::WHILE;
+        if (w == "until") return ScriptKw::UNTIL;
+        if (w == "for")   return ScriptKw::FOR;
+        if (w == "do")    return ScriptKw::DO;
+        if (w == "done")  return ScriptKw::DONE;
+        return ScriptKw::NONE;
+    }
+
+    // Block openers increase nesting; closers decrease it. Used by all the
+    // delimiter scanners so if..fi and while/for/until..done nest correctly.
+    static bool kw_is_opener(ScriptKw k) {
+        return k == ScriptKw::IF || k == ScriptKw::WHILE ||
+               k == ScriptKw::FOR || k == ScriptKw::UNTIL;
+    }
+    static bool kw_is_closer(ScriptKw k) {
+        return k == ScriptKw::FI || k == ScriptKw::DONE;
+    }
+
+    // Text after the first word (the condition for if/elif), trimmed.
+    static std::string after_keyword(const std::string& line) {
+        size_t a = line.find_first_not_of(" \t");
+        size_t b = (a == std::string::npos) ? std::string::npos
+                                            : line.find_first_of(" \t", a);
+        if (b == std::string::npos) return "";
+        std::string rest = line.substr(b);
+        Helpers::trim(rest);
+        return rest;
+    }
+
+    // Split a line on top-level ';' (command separator), honoring quotes.
+    static std::vector<std::string> split_semicolons(const std::string& in) {
+        std::vector<std::string> out;
+        std::string cur; char quote = 0;
+        for (size_t i = 0; i < in.size(); ++i) {
+            char c = in[i];
+            if (quote) { cur += c; if (c == quote) quote = 0; continue; }
+            if (c == '"' || c == '\'') { quote = c; cur += c; continue; }
+            if (c == ';') { out.push_back(cur); cur.clear(); continue; }
+            cur += c;
+        }
+        out.push_back(cur);
+        return out;
+    }
+
+    // Turn raw file/input lines into normalized logical lines: split on ';',
+    // drop blanks and '#' comments, and separate an inline command that follows
+    // a leading 'then'/'else' keyword (so every keyword sits on its own line).
+    static std::vector<std::string> flatten_script(const std::vector<std::string>& raw) {
+        std::vector<std::string> out;
+        for (const auto& rl : raw) {
+            for (auto seg : split_semicolons(rl)) {
+                Helpers::trim(seg);
+                if (seg.empty() || seg[0] == '#') continue;
+                ScriptKw k = script_kw(seg);
+                if (k == ScriptKw::THEN || k == ScriptKw::ELSE ||
+                    k == ScriptKw::DO) {
+                    out.push_back(k == ScriptKw::THEN ? "then"
+                                : k == ScriptKw::ELSE ? "else" : "do");
+                    std::string rest = after_keyword(seg);
+                    if (!rest.empty()) out.push_back(rest);
+                } else {
+                    out.push_back(seg);
+                }
+            }
+        }
+        return out;
+    }
+
+    // From `from`, find the next elif/else/fi that belongs to the current if
+    // (depth 0), skipping nested if..fi and while/for..done. Returns (size_t)-1
+    // if none found or a mismatched closer (done) appears at depth 0.
+    static size_t find_if_delim(const std::vector<std::string>& L,
+                                size_t from, size_t hi) {
+        int depth = 0;
+        for (size_t i = from; i < hi; ++i) {
+            ScriptKw k = script_kw(L[i]);
+            if (kw_is_opener(k)) depth++;
+            else if (kw_is_closer(k)) {
+                if (depth == 0) return (k == ScriptKw::FI) ? i : (size_t)-1;
+                depth--;
+            } else if (depth == 0 && (k == ScriptKw::ELSE || k == ScriptKw::ELIF)) {
+                return i;
+            }
+        }
+        return (size_t)-1;
+    }
+
+    // Find the 'do' that opens a while/for body (depth 0). Returns (size_t)-1 if
+    // a closer is hit first or none is found.
+    static size_t find_do(const std::vector<std::string>& L,
+                          size_t from, size_t hi) {
+        int depth = 0;
+        for (size_t i = from; i < hi; ++i) {
+            ScriptKw k = script_kw(L[i]);
+            if (kw_is_opener(k)) depth++;
+            else if (kw_is_closer(k)) {
+                if (depth == 0) return (size_t)-1; // closer before do
+                depth--;
+            } else if (k == ScriptKw::DO && depth == 0) {
+                return i;
+            }
+        }
+        return (size_t)-1;
+    }
+
+    // Find the matching 'done' for a loop body starting at `from` (just after do),
+    // skipping nested constructs. Returns (size_t)-1 if none; the caller checks
+    // the returned line really is DONE (not a mismatched FI).
+    static size_t find_done(const std::vector<std::string>& L,
+                            size_t from, size_t hi) {
+        int depth = 0;
+        for (size_t i = from; i < hi; ++i) {
+            ScriptKw k = script_kw(L[i]);
+            if (kw_is_opener(k)) depth++;
+            else if (kw_is_closer(k)) {
+                if (depth == 0) return i;
+                depth--;
+            }
+        }
+        return (size_t)-1;
+    }
+
+    // Execute a single (already flattened) line as a command.
+    void run_one(const std::string& ln, bool verbose) {
+        if (verbose) print(prompt + ln + "\n");
+        command = ln;
+        execute_command();
+    }
+
+    // Run condition lines; the condition is true iff the LAST one exits 0.
+    bool eval_condition(const std::vector<std::string>& condLines, bool verbose) {
+        if (condLines.empty()) { Helpers::cmd_status = 2; return false; }
+        for (const auto& ln : condLines) run_one(ln, verbose);
+        return Helpers::cmd_status == 0;
+    }
+
+    // Execute one if-construct starting at L[ifIdx] (keyword IF). Returns the
+    // index just past the matching 'fi'. Sets $?=2 on a syntax error.
+    size_t run_if(const std::vector<std::string>& L, size_t ifIdx,
+                  size_t hi, bool verbose) {
+        size_t cur = ifIdx;     // points at IF (first pass) or ELIF (later passes)
+        bool taken = false;     // has some branch already run?
+        while (true) {
+            // Collect the condition: inline part of if/elif + lines until 'then'.
+            std::vector<std::string> condLines;
+            std::string inl = after_keyword(L[cur]);
+            if (!inl.empty()) condLines.push_back(inl);
+            size_t i = cur + 1;
+            while (i < hi && script_kw(L[i]) != ScriptKw::THEN) {
+                ScriptKw k = script_kw(L[i]);
+                if (k == ScriptKw::FI || k == ScriptKw::ELSE || k == ScriptKw::ELIF) {
+                    print("sh: syntax error: expected 'then'\n");
+                    Helpers::cmd_status = 2; return hi;
+                }
+                condLines.push_back(L[i]); i++;
+            }
+            if (i >= hi) {
+                print("sh: syntax error: 'if' without 'then'\n");
+                Helpers::cmd_status = 2; return hi;
+            }
+            size_t thenIdx = i;
+            size_t delim = find_if_delim(L, thenIdx + 1, hi);
+            if (delim == (size_t)-1) {
+                print("sh: syntax error: missing 'fi'\n");
+                Helpers::cmd_status = 2; return hi;
+            }
+
+            if (!taken && eval_condition(condLines, verbose)) {
+                run_block(L, thenIdx + 1, delim, verbose);
+                taken = true;
+            }
+
+            ScriptKw dk = script_kw(L[delim]);
+            if (dk == ScriptKw::FI) return delim + 1;
+            if (dk == ScriptKw::ELIF) { cur = delim; continue; }
+            // ELSE: body runs to the matching 'fi'.
+            size_t fiIdx = find_if_delim(L, delim + 1, hi);
+            if (fiIdx == (size_t)-1 || script_kw(L[fiIdx]) != ScriptKw::FI) {
+                print("sh: syntax error: missing 'fi'\n");
+                Helpers::cmd_status = 2; return hi;
+            }
+            if (!taken) run_block(L, delim + 1, fiIdx, verbose);
+            return fiIdx + 1;
+        }
+    }
+
+    // Poll the keyboard for Ctrl+C so a running loop can be aborted (there is no
+    // other way to interrupt a script). Returns true when the break is pressed.
+    bool loop_break_pressed() {
+        M5Cardputer.update();
+        auto& kb = M5Cardputer.Keyboard;
+        if (kb.isPressed()) {
+            Keyboard_Class::KeysState st = kb.keysState();
+            if (st.ctrl) {
+                for (auto c : st.word) {
+                    char lc = (c >= 'A' && c <= 'Z') ? (char)(c + 32) : c;
+                    if (lc == 'c') return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    // while COND ; do BODY ; done   (until = run while COND is FALSE)
+    // Returns the index just past 'done'. Sets $?=2 on a syntax error.
+    size_t run_while(const std::vector<std::string>& L, size_t idx,
+                     size_t hi, bool verbose, bool until) {
+        size_t doIdx = find_do(L, idx + 1, hi);
+        if (doIdx == (size_t)-1) {
+            print("sh: syntax error: expected 'do'\n");
+            Helpers::cmd_status = 2; return hi;
+        }
+        size_t doneIdx = find_done(L, doIdx + 1, hi);
+        if (doneIdx == (size_t)-1 || script_kw(L[doneIdx]) != ScriptKw::DONE) {
+            print("sh: syntax error: missing 'done'\n");
+            Helpers::cmd_status = 2; return hi;
+        }
+        // Condition lines: inline part of the while line + lines up to 'do'.
+        std::vector<std::string> condLines;
+        std::string inl = after_keyword(L[idx]);
+        if (!inl.empty()) condLines.push_back(inl);
+        for (size_t k = idx + 1; k < doIdx; ++k) condLines.push_back(L[k]);
+
+        bool aborted = false;
+        while (true) {
+            if (loop_break_pressed()) { aborted = true; break; }
+            bool c = eval_condition(condLines, verbose);
+            bool go = until ? !c : c;
+            if (!go) break;
+            run_block(L, doIdx + 1, doneIdx, verbose);
+        }
+        if (aborted) { print("^C\n"); Helpers::cmd_status = 130; }
+        return doneIdx + 1;
+    }
+
+    // for VAR in LIST ; do BODY ; done
+    // Returns the index just past 'done'. Sets $?=2 on a syntax error.
+    size_t run_for(const std::vector<std::string>& L, size_t idx,
+                   size_t hi, bool verbose) {
+        // Header after 'for': "VAR in LIST..."
+        std::string hdr = after_keyword(L[idx]);
+        auto htoks = Helpers::tokenize(hdr);
+        if (htoks.size() < 2 || htoks[1] != "in") {
+            print("sh: syntax error: for VAR in LIST\n");
+            Helpers::cmd_status = 2; return hi;
+        }
+        std::string var = htoks[0];
+        // Reconstruct the raw list text after the word 'in' (keep quoting/globs).
+        size_t inPos = hdr.find(" in");
+        std::string listRaw = (inPos == std::string::npos)
+                                ? "" : hdr.substr(inPos + 3);
+        Helpers::trim(listRaw);
+
+        size_t doIdx = find_do(L, idx + 1, hi);
+        if (doIdx == (size_t)-1) {
+            print("sh: syntax error: expected 'do'\n");
+            Helpers::cmd_status = 2; return hi;
+        }
+        size_t doneIdx = find_done(L, doIdx + 1, hi);
+        if (doneIdx == (size_t)-1 || script_kw(L[doneIdx]) != ScriptKw::DONE) {
+            print("sh: syntax error: missing 'done'\n");
+            Helpers::cmd_status = 2; return hi;
+        }
+
+        // Expand variables then globs, then split into words. The "_ " prefix
+        // gives expand_globs a dummy command at index 0 (it never globs token 0).
+        std::string le = expand_vars(listRaw, vars, scriptArgs, Helpers::cmd_status);
+        Helpers::cmd_status = 0;
+        le = CommonCmds::expand_braces(le);   // {1..5} / {0..10..2}
+        std::string lg = CommonCmds::expand_globs("_ " + le);
+        if (lg.rfind("_ ", 0) == 0) lg = lg.substr(2);
+        else if (lg == "_") lg = "";
+        std::vector<std::string> words = Helpers::tokenize(lg);
+
+        bool aborted = false;
+        for (const auto& w : words) {
+            if (loop_break_pressed()) { aborted = true; break; }
+            vars[var] = w;                 // set loop variable
+            run_block(L, doIdx + 1, doneIdx, verbose);
+        }
+        if (aborted) { print("^C\n"); Helpers::cmd_status = 130; }
+        return doneIdx + 1;
+    }
+
+    // Interpret a block of flattened lines L[lo..hi): plain lines run as commands,
+    // if..fi constructs are handled by run_if. A stray then/elif/else/fi is a
+    // syntax error.
+    void run_block(const std::vector<std::string>& L, size_t lo, size_t hi,
+                   bool verbose) {
+        size_t pc = lo;
+        while (pc < hi) {
+            ScriptKw kw = script_kw(L[pc]);
+            if (kw == ScriptKw::IF) {
+                pc = run_if(L, pc, hi, verbose);
+            } else if (kw == ScriptKw::WHILE || kw == ScriptKw::UNTIL) {
+                pc = run_while(L, pc, hi, verbose, kw == ScriptKw::UNTIL);
+            } else if (kw == ScriptKw::FOR) {
+                pc = run_for(L, pc, hi, verbose);
+            } else if (kw == ScriptKw::THEN || kw == ScriptKw::ELSE ||
+                       kw == ScriptKw::ELIF || kw == ScriptKw::FI ||
+                       kw == ScriptKw::DO   || kw == ScriptKw::DONE) {
+                print(std::string("sh: syntax error near '") + L[pc] + "'\n");
+                Helpers::cmd_status = 2;
+                return;
+            } else {
+                run_one(L[pc], verbose);
+                pc++;
+            }
+        }
+    }
+
     void run_profile() {
         run_script("/.profile", false, {"/.profile"}); // boot, silent, $0=/.profile
     }
@@ -106,25 +432,23 @@ public:
         std::vector<std::string> savedArgs = scriptArgs; // save caller's params
         scriptArgs = args;
         scriptDepth++;
-        std::string line;
-        auto runLine = [this, verbose](std::string ln) {
-            Helpers::trim(ln);
-            if (ln.empty() || ln[0] == '#') return; // skip blanks and comments
-            if (verbose) {                          // -v: echo into scrollback + screen
-                print(prompt + ln + "\n");
-            }
-            command = ln;
-            execute_command();
-        };
 
+        // Read the whole file into raw lines, then interpret as a block so that
+        // multi-line constructs (if..fi, later while/for) can look ahead.
+        std::vector<std::string> rawLines;
+        std::string line;
         while (f.available()) {
             int c = f.read();
             if (c < 0) break;
-            if (c == '\n') { runLine(line); line.clear(); }
+            if (c == '\n') { rawLines.push_back(line); line.clear(); }
             else if (c != '\r' && line.size() < 512) { line += (char)c; }
         }
-        if (!line.empty()) runLine(line); // last line without a trailing newline
+        if (!line.empty()) rawLines.push_back(line);
         f.close();
+
+        auto lines = flatten_script(rawLines);
+        run_block(lines, 0, lines.size(), verbose);
+
         scriptDepth--;
         scriptArgs = savedArgs; // restore caller's params
         return true;
@@ -671,6 +995,91 @@ public:
         return true;
     }
 
+    // ---- Integer arithmetic for $(( ))  (+ - * / %, parens, unary, vars) ----
+    static void arith_skipws(const std::string& s, size_t& p) {
+        while (p < s.size() && (s[p] == ' ' || s[p] == '\t')) p++;
+    }
+    // Read a bare identifier's integer value from vars (undefined / non-numeric
+    // -> 0), parsing a leading optional sign and digits.
+    static long arith_var(const std::map<std::string, std::string>& vars,
+                          const std::string& name) {
+        auto it = vars.find(name);
+        if (it == vars.end()) return 0;
+        const std::string& v = it->second;
+        size_t q = 0; while (q < v.size() && (v[q] == ' ' || v[q] == '\t')) q++;
+        bool neg = false;
+        if (q < v.size() && (v[q] == '-' || v[q] == '+')) { neg = (v[q] == '-'); q++; }
+        long r = 0; bool any = false;
+        while (q < v.size() && v[q] >= '0' && v[q] <= '9') { r = r * 10 + (v[q] - '0'); q++; any = true; }
+        if (!any) return 0;
+        return neg ? -r : r;
+    }
+    static long arith_factor(const std::string& s, size_t& p,
+                             const std::map<std::string, std::string>& vars, bool& err) {
+        arith_skipws(s, p);
+        if (p >= s.size()) { err = true; return 0; }
+        char c = s[p];
+        if (c == '+') { p++; return arith_factor(s, p, vars, err); }
+        if (c == '-') { p++; return -arith_factor(s, p, vars, err); }
+        if (c == '(') {
+            p++;
+            long v = arith_expr(s, p, vars, err);
+            arith_skipws(s, p);
+            if (p < s.size() && s[p] == ')') p++; else err = true;
+            return v;
+        }
+        if (c >= '0' && c <= '9') {
+            long v = 0;
+            while (p < s.size() && s[p] >= '0' && s[p] <= '9') { v = v * 10 + (s[p] - '0'); p++; }
+            return v;
+        }
+        if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || c == '_') {
+            size_t st = p;
+            while (p < s.size() && ((s[p] >= 'A' && s[p] <= 'Z') ||
+                   (s[p] >= 'a' && s[p] <= 'z') || (s[p] >= '0' && s[p] <= '9') ||
+                   s[p] == '_')) p++;
+            return arith_var(vars, s.substr(st, p - st));
+        }
+        err = true; return 0;
+    }
+    static long arith_term(const std::string& s, size_t& p,
+                           const std::map<std::string, std::string>& vars, bool& err) {
+        long v = arith_factor(s, p, vars, err);
+        for (;;) {
+            arith_skipws(s, p);
+            if (p < s.size() && (s[p] == '*' || s[p] == '/' || s[p] == '%')) {
+                char op = s[p++];
+                long r = arith_factor(s, p, vars, err);
+                if ((op == '/' || op == '%') && r == 0) { err = true; v = 0; }
+                else if (op == '*') v *= r;
+                else if (op == '/') v /= r;
+                else v %= r;
+            } else break;
+        }
+        return v;
+    }
+    static long arith_expr(const std::string& s, size_t& p,
+                           const std::map<std::string, std::string>& vars, bool& err) {
+        long v = arith_term(s, p, vars, err);
+        for (;;) {
+            arith_skipws(s, p);
+            if (p < s.size() && (s[p] == '+' || s[p] == '-')) {
+                char op = s[p++];
+                long r = arith_term(s, p, vars, err);
+                v = (op == '+') ? v + r : v - r;
+            } else break;
+        }
+        return v;
+    }
+    static long eval_arith(const std::string& s,
+                           const std::map<std::string, std::string>& vars, bool& err) {
+        size_t p = 0;
+        long v = arith_expr(s, p, vars, err);
+        arith_skipws(s, p);
+        if (p != s.size()) err = true; // trailing junk
+        return v;
+    }
+
     // Expand $NAME and ${NAME} against the given variables. Undefined names
     // expand to an empty string (like a typical shell). "\$" yields a literal $.
     static std::string expand_vars(const std::string& in,
@@ -686,6 +1095,29 @@ public:
                 out += '$'; i += 2; continue; // escaped: \$ -> $
             }
             if (c == '$') {
+                // $(( EXPR )) - arithmetic expansion (checked before ${...}).
+                if (in.compare(i, 3, "$((") == 0) {
+                    size_t k = i + 3; int depth = 0; bool closed = false;
+                    while (k < in.size()) {
+                        char d = in[k];
+                        if (d == '(') depth++;
+                        else if (d == ')') {
+                            if (depth == 0) { closed = true; break; }
+                            depth--;
+                        }
+                        k++;
+                    }
+                    if (closed && k + 1 < in.size() && in[k + 1] == ')') {
+                        std::string expr = in.substr(i + 3, k - (i + 3));
+                        std::string inner = expand_vars(expr, vars, args, status);
+                        bool aerr = false;
+                        long v = eval_arith(inner, vars, aerr);
+                        out += std::to_string(v); // malformed/div0 -> 0
+                        i = k + 2; // skip the closing "))"
+                        continue;
+                    }
+                    // not a well-formed $(( )) -> fall through to literal handling
+                }
                 size_t j = i + 1;
                 bool braced = false;
                 if (j < in.size() && in[j] == '{') { braced = true; j++; }
@@ -855,6 +1287,90 @@ public:
         return false;
     }
 
+    // ---- test / [ ] condition evaluation ----
+    // File predicates (operand is resolved relative to the current directory).
+    static bool test_exists(const std::string& p) {
+        File f = Helpers::fsOpen(Helpers::make_absolute(p));
+        bool e = (bool)f; if (f) f.close(); return e;
+    }
+    static bool test_isdir(const std::string& p) {
+        File f = Helpers::fsOpen(Helpers::make_absolute(p));
+        bool e = f && f.isDirectory(); if (f) f.close(); return e;
+    }
+    static bool test_isfile(const std::string& p) {
+        File f = Helpers::fsOpen(Helpers::make_absolute(p));
+        bool e = f && !f.isDirectory(); if (f) f.close(); return e;
+    }
+    static bool test_nonempty(const std::string& p) {
+        File f = Helpers::fsOpen(Helpers::make_absolute(p));
+        bool e = f && !f.isDirectory() && f.size() > 0; if (f) f.close(); return e;
+    }
+    // Parse a (possibly signed) integer; returns false if not a valid integer.
+    static bool test_int(const std::string& s, long& out) {
+        if (s.empty()) return false;
+        size_t i = 0; bool neg = false;
+        if (s[0] == '+' || s[0] == '-') { neg = (s[0] == '-'); i = 1; }
+        if (i >= s.size()) return false;
+        long v = 0;
+        for (; i < s.size(); ++i) {
+            if (s[i] < '0' || s[i] > '9') return false;
+            v = v * 10 + (s[i] - '0');
+        }
+        out = neg ? -v : v; return true;
+    }
+
+    // Evaluate a test/[ ] expression. Returns 0 (true), 1 (false), 2 (error).
+    // Supports: file tests -e/-f/-d/-s, string -z/-n and =/!=, numeric
+    // -eq/-ne/-lt/-le/-gt/-ge, a lone non-empty string, and a leading ! negation.
+    static int eval_test(std::vector<std::string> a, LineCallback emit) {
+        bool negate = false;
+        if (!a.empty() && a[0] == "!") { negate = true; a.erase(a.begin()); }
+
+        int r;
+        if (a.empty()) {
+            r = 1;                                  // no expression -> false
+        } else if (a.size() == 1) {
+            r = a[0].empty() ? 1 : 0;               // non-empty string is true
+        } else if (a.size() == 2) {
+            const std::string& op = a[0];
+            const std::string& x = a[1];
+            if      (op == "-z") r = x.empty() ? 0 : 1;
+            else if (op == "-n") r = x.empty() ? 1 : 0;
+            else if (op == "-e") r = test_exists(x)   ? 0 : 1;
+            else if (op == "-f") r = test_isfile(x)   ? 0 : 1;
+            else if (op == "-d") r = test_isdir(x)    ? 0 : 1;
+            else if (op == "-s") r = test_nonempty(x) ? 0 : 1;
+            else { emit("test: unknown operator: " + op + "\n"); r = 2; }
+        } else if (a.size() == 3) {
+            const std::string& x  = a[0];
+            const std::string& op = a[1];
+            const std::string& y  = a[2];
+            if      (op == "=" || op == "==") r = (x == y) ? 0 : 1;
+            else if (op == "!=")              r = (x != y) ? 0 : 1;
+            else if (op == "-eq" || op == "-ne" || op == "-lt" ||
+                     op == "-le" || op == "-gt" || op == "-ge") {
+                long lx, ly;
+                if (!test_int(x, lx) || !test_int(y, ly)) {
+                    emit("test: integer expected\n"); r = 2;
+                } else {
+                    bool t;
+                    if      (op == "-eq") t = (lx == ly);
+                    else if (op == "-ne") t = (lx != ly);
+                    else if (op == "-lt") t = (lx <  ly);
+                    else if (op == "-le") t = (lx <= ly);
+                    else if (op == "-gt") t = (lx >  ly);
+                    else                  t = (lx >= ly); // -ge
+                    r = t ? 0 : 1;
+                }
+            } else { emit("test: unknown operator: " + op + "\n"); r = 2; }
+        } else {
+            emit("test: too many arguments\n"); r = 2;
+        }
+
+        if (negate && r != 2) r = (r == 0) ? 1 : 0;
+        return r;
+    }
+
     // One segment of an &&/|| chain, with the operator that PRECEDES it.
     enum class ChainOp { NONE, AND, OR };
     struct ChainSeg { ChainOp op; std::string text; };
@@ -968,6 +1484,23 @@ public:
         historyIndex = (int)cmdHistory.size();
         savedLine = "";
 
+        // Inline compound statements typed at the prompt: if/while/until/for on a
+        // single line (e.g. `for x in a b c; do echo $x; done`). Multi-line blocks
+        // come through scripts (run_block); here we handle the single-line form.
+        // Run it like a mini-script (silent body, one prompt after).
+        {
+            ScriptKw k0 = script_kw(cmd);
+            if (k0 == ScriptKw::IF || k0 == ScriptKw::WHILE ||
+                k0 == ScriptKw::UNTIL || k0 == ScriptKw::FOR) {
+                scriptDepth++;
+                auto lines = flatten_script(std::vector<std::string>{cmd});
+                run_block(lines, 0, lines.size(), false);
+                scriptDepth--;
+                print_prompt();
+                return;
+            }
+        }
+
         // --- &&/|| short-circuit chains ---
         // Split the line at top-level && / || and run the segments with bash
         // short-circuit semantics driven by $? (Helpers::cmd_status). Done before
@@ -1020,6 +1553,7 @@ public:
         // applies to grep, and the left command just feeds the filter.
         File redirectFile; // RAII: closed/flushed when the function returns
         std::shared_ptr<std::string> grepBuf;
+        std::shared_ptr<bool> grepMatched;
         bool hasGrep = false;
         std::string grepPattern;
 
@@ -1077,6 +1611,7 @@ public:
             redirectFile = Helpers::fsOpen(redirectTarget, redirectAppend ? "a" : "w");
             if (!redirectFile) {
                 emit("Cannot write to " + Helpers::clearFilename(redirectTarget) + "\n");
+                Helpers::cmd_status = 1; // so `... > bad || fallback` runs the fallback
                 print_prompt();
                 return;
             }
@@ -1088,14 +1623,17 @@ public:
         // 4) Build the active emit: grep filter over sink, or sink directly
         if (hasGrep) {
             grepBuf = std::make_shared<std::string>();
+            grepMatched = std::make_shared<bool>(false);
             std::string pat = grepPattern;
-            emit = [sink, grepBuf, pat](const std::string& s) {
+            auto matched = grepMatched;
+            emit = [sink, grepBuf, matched, pat](const std::string& s) {
                 *grepBuf += s;
                 size_t nl;
                 while ((nl = grepBuf->find('\n')) != std::string::npos) {
                     std::string line = grepBuf->substr(0, nl);
                     grepBuf->erase(0, nl + 1);
                     if (pat.empty() || line.find(pat) != std::string::npos) {
+                        *matched = true;
                         sink(line + "\n");
                     }
                 }
@@ -1115,6 +1653,11 @@ public:
         // pipe and redirection have been stripped, so only the command name and
         // its file arguments remain. A pattern that matches nothing is left
         // literal, exactly like a typical shell.
+        // Numeric brace ranges {1..5} / {0..10..2} expand before globbing, so
+        // `echo {1..3}` and `touch f{1..3}.txt` work like a shell.
+        if (cmd.find('{') != std::string::npos) {
+            cmd = CommonCmds::expand_braces(cmd);
+        }
         if (cmd.find_first_of("*?") != std::string::npos &&
             cmd != "find" && cmd.rfind("find ", 0) != 0 &&
             cmd.rfind("wget ", 0) != 0) {
@@ -1320,6 +1863,25 @@ public:
                     text = joined;
                 }
                 CommonCmds::echo(text, file, append, emit);
+            }
+            else if (cmd == "test" || cmd.rfind("test ", 0) == 0 ||
+                     cmd == "[" || cmd.rfind("[ ", 0) == 0) {
+                // test EXPR  /  [ EXPR ]  - evaluate a condition, set $? only.
+                bool bracket = (cmd == "[" || cmd.rfind("[ ", 0) == 0);
+                std::string rest = bracket ? (cmd.size() > 1 ? cmd.substr(1) : "")
+                                           : (cmd.size() > 4 ? cmd.substr(4) : "");
+                auto args = split_ws(rest); // quote-aware tokens
+                if (bracket) {
+                    if (args.empty() || args.back() != "]") {
+                        emit("[: missing ']'\n");
+                        Helpers::cmd_status = 2;
+                    } else {
+                        args.pop_back(); // drop the closing ]
+                        Helpers::cmd_status = eval_test(args, emit);
+                    }
+                } else {
+                    Helpers::cmd_status = eval_test(args, emit);
+                }
             }
             else if (cmd == "ls" || cmd.rfind("ls ", 0) == 0) {
                 // ls [-a] [path...]   -a shows hidden (dot) names.
@@ -1572,8 +2134,14 @@ public:
         // Flush the last grep line without a trailing '\n'
         if (hasGrep && grepBuf && !grepBuf->empty()) {
             if (grepPattern.empty() || grepBuf->find(grepPattern) != std::string::npos) {
+                if (grepMatched) *grepMatched = true;
                 sink(*grepBuf + "\n");
             }
+        }
+        // In a pipeline the exit status is grep's: 0 if it matched a line, 1 if
+        // nothing matched (overrides whatever the left-hand command set).
+        if (hasGrep) {
+            Helpers::cmd_status = (grepMatched && *grepMatched) ? 0 : 1;
         }
 
         if (!WiFiCmds::waitingForPass) {
