@@ -146,6 +146,16 @@ static std::string ping_extract_host(const std::string& target) {
     return host;
 }
 
+int NetworkCmds::resolve_target(const std::string& target, IPAddress& out,
+                                std::string& host) {
+    host = ping_extract_host(target);
+    if (host.empty()) return 1;
+    if (out.fromString(String(host.c_str()))) return 0;   // already a literal IP
+    if (WiFi.status() != WL_CONNECTED) return 2;          // DNS needs WiFi
+    if (WiFi.hostByName(host.c_str(), out) && out != IPAddress(0, 0, 0, 0)) return 0;
+    return 3;
+}
+
 void NetworkCmds::ping(const std::string& target, uint8_t count, LineCallback emit) {
     if (WiFi.status() != WL_CONNECTED) {
         emit("Not connected to WiFi\n");

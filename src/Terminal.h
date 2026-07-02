@@ -722,9 +722,9 @@ public:
         editor = new Editor(path);
         if (!editor->ok()) {
             print(editor->error() + std::string("\n"));
+            Helpers::cmd_status = 1;
             delete editor;
             editor = nullptr;
-            print_prompt();
             return;
         }
         editorActive = true;
@@ -754,7 +754,6 @@ public:
         if (WiFi.status() != WL_CONNECTED) {
             print("Not connected to WiFi\n");
             Helpers::cmd_status = 1;
-            print_prompt();
             return;
         }
         print("Connecting to " + host + ":" + std::to_string(port) + "...\n");
@@ -764,7 +763,6 @@ public:
             Helpers::cmd_status = 1;
             delete telnet;
             telnet = nullptr;
-            print_prompt();
             return;
         }
         telnetActive = true;
@@ -818,7 +816,7 @@ public:
                 long v; if (parse_uint(toks[++i], v) && v >= 1 && v <= 65535) port = (uint16_t)v;
             } else positional.push_back(toks[i]);
         }
-        if (positional.empty()) { print("Usage: ssh [user@]host [port]\n"); print_prompt(); return; }
+        if (positional.empty()) { print("Usage: ssh [user@]host [port]\n"); Helpers::cmd_status = 1; return; }
 
         std::string target = positional[0];
         size_t at = target.find('@');
@@ -827,9 +825,9 @@ public:
         // optional bare port as second positional
         if (positional.size() >= 2) { long v; if (parse_uint(positional[1], v) && v >= 1 && v <= 65535) port = (uint16_t)v; }
 
-        if (host.empty()) { print("ssh: no host\n"); Helpers::cmd_status = 1; print_prompt(); return; }
-        if (user.empty()) { print("ssh: no user (use user@host or -l user)\n"); Helpers::cmd_status = 1; print_prompt(); return; }
-        if (WiFi.status() != WL_CONNECTED) { print("Not connected to WiFi\n"); Helpers::cmd_status = 1; print_prompt(); return; }
+        if (host.empty()) { print("ssh: no host\n"); Helpers::cmd_status = 1; return; }
+        if (user.empty()) { print("ssh: no user (use user@host or -l user)\n"); Helpers::cmd_status = 1; return; }
+        if (WiFi.status() != WL_CONNECTED) { print("Not connected to WiFi\n"); Helpers::cmd_status = 1; return; }
 
         sshUser = user; sshHost = host; sshPort = port;
         sshWaitingForPass = true;
@@ -1430,7 +1428,7 @@ public:
         if (c == "ping")   return "Usage: ping <host|ip|url> [count]\n";
         if (c == "wget")   return "Usage: wget <url> [-o <path>]\n";
         if (c == "wf c")   return "Usage: wf c <ssid> [-p <password>]\n";
-        if (c == "net s p")return "Usage: net s p <ip> <port|a-b>...\n";
+        if (c == "net s p")return "Usage: net s p <host|ip|url> <port|a-b>...\n";
         return "";
     }
 
@@ -1665,6 +1663,12 @@ public:
         }
 
         try {
+          // Run the command dispatch inside a lambda: an early `return` from an
+          // error branch then falls through to the shared tail below (grep flush,
+          // prompt) instead of skipping it. Mode-entering commands (telnet/ssh/
+          // edit) set their *Active flag, which the tail checks before printing a
+          // prompt, so they still take over the screen without one.
+          [&]() {
             if (cmd.substr(0, 4) == "cat ") {
                 std::string args, file;
                 bool append;
@@ -2050,21 +2054,25 @@ public:
                 NetworkCmds::ping(toks[0], count, emit);
             }
             else if (cmd.rfind("net s p ", 0) == 0) {
-                // net s p <ip> <port|range>...
+                // net s p <host|ip|url> <port|range>...
                 //   individual ports:  net s p 192.168.1.1 21 22 80 8080
-                //   range:             net s p 192.168.1.1 21-80
-                //   can be mixed:      net s p 192.168.1.1 22 80 1000-1010
+                //   range:             net s p scanme.nmap.org 21-80
+                //   can be mixed:      net s p example.com 22 80 1000-1010
                 auto tokens = split_ws(cmd.substr(8));
 
                 if (tokens.size() < 2) {
-                    emit("Usage: net s p <ip> <port|a-b>...\n");
+                    emit("Usage: net s p <host|ip|url> <port|a-b>...\n");
                     Helpers::cmd_status = 1;
                     return;
                 }
 
                 IPAddress ip;
-                if (!ip.fromString(String(tokens[0].c_str()))) {
-                    emit("Invalid IP address\n");
+                std::string host;
+                int rc = NetworkCmds::resolve_target(tokens[0], ip, host);
+                if (rc != 0) {
+                    if (rc == 1)      emit("net s p: invalid target\n");
+                    else if (rc == 2) emit("Not connected to WiFi\n");
+                    else              emit("net s p: cannot resolve " + host + "\n");
                     Helpers::cmd_status = 1;
                     return;
                 }
@@ -2104,9 +2112,10 @@ public:
                     }
                 }
 
-                if (bad) return;
+                if (bad) { Helpers::cmd_status = 1; return; }
                 if (ports.empty()) {
                     emit("No valid ports\n");
+                    Helpers::cmd_status = 1;
                     return;
                 }
                 if (truncated) {
@@ -2125,6 +2134,7 @@ public:
                     Helpers::cmd_status = 127; // bash convention for "command not found"
                 }
             }
+          }(); // end dispatch lambda (invoked immediately)
         }
         catch (...) {
             emit("Execution error\n");
@@ -2144,7 +2154,10 @@ public:
             Helpers::cmd_status = (grepMatched && *grepMatched) ? 0 : 1;
         }
 
-        if (!WiFiCmds::waitingForPass) {
+        // Print the next prompt unless a full-screen mode took over (editor,
+        // telnet, ssh) or we are waiting for a password to be typed.
+        if (!editorActive && !telnetActive && !sshActive &&
+            !sshWaitingForPass && !WiFiCmds::waitingForPass) {
             print_prompt();
         }
     }

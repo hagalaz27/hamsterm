@@ -19,6 +19,12 @@ public:
     static void net_scan_ports(const IPAddress ip, const std::vector<uint16_t>& ports, LineCallback emit);
     static void ping(const std::string& target, uint8_t count, LineCallback emit);
 
+    // Resolve a host|ip|url target to an IPAddress. Return code:
+    //   0 = ok (out set), 1 = empty/invalid target,
+    //   2 = WiFi not connected (needed for DNS), 3 = DNS resolution failed.
+    // `host` receives the extracted hostname (useful for error messages).
+    static int resolve_target(const std::string& target, IPAddress& out, std::string& host);
+
     // wget <url> [-o <path>] : download a URL to a file (streamed, not buffered).
     static void wget(const std::string& args, LineCallback emit);
     // Derive a local filename from a URL (strips scheme/query/fragment; "" -> index.html).

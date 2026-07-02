@@ -19,8 +19,8 @@ shell-style globbing, and user variables - all driven from the device keyboard.
   at the prompt: `if [ -d /sd ]; then ls /sd; else echo no SD; fi`). The condition
   is any command - its exit status picks the branch. Blocks nest, and `elif`
   chains alternatives.
-- **Loops:** `while C; do ...; done` (repeat while C is true), `until C; do ...; done` 
-  (until C becomes true), and `for x in LIST; do ...; done` (LIST is words,
+- **Loops:** `while C; do ...; done` (repeat while C is true), `until C; do ...;
+  done` (until C becomes true), and `for x in LIST; do ...; done` (LIST is words,
   with `$vars`, numeric ranges `{1..5}` / `{0..10..2}`, and `*` globs expanded).
   Loops nest with each other and with `if`. Press **Ctrl+C** to break a running
   loop.
