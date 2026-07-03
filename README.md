@@ -37,6 +37,8 @@ shell-style globbing, and user variables - all driven from the device keyboard.
   `cmd1 || cmd2` only if it failed) - works at the prompt and in scripts
 - **Storage:** mount/unmount microSD at `/sd`, `df`
 - **Wi-Fi & network:** scan, connect, `ping`, local network + port scan
+  (`net s p <host> [ports]`, defaults to the top 1000; open ports are labelled
+  with their likely service)
 - **Downloads:** `wget <url> [-o path]` - fetch a file over HTTP/HTTPS (streamed to flash or `/sd`)
 - **Access point:** host a Wi-Fi AP with `ap -s ssid [-p pass] start` (open or WPA2)
 - **telnet / nc:** interactive client with local line editing, ANSI handling

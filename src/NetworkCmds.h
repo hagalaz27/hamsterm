@@ -25,6 +25,10 @@ public:
     // `host` receives the extracted hostname (useful for error messages).
     static int resolve_target(const std::string& target, IPAddress& out, std::string& host);
 
+    // Space-separated list of the ~1000 most common TCP ports (with ranges),
+    // used by "net s p <host>" when no ports are given.
+    static const char* default_ports();
+
     // wget <url> [-o <path>] : download a URL to a file (streamed, not buffered).
     static void wget(const std::string& args, LineCallback emit);
     // Derive a local filename from a URL (strips scheme/query/fragment; "" -> index.html).

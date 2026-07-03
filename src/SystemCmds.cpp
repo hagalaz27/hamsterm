@@ -35,7 +35,7 @@ void SystemCmds::help(LineCallback emit) {
     emit("       wf dc\n");
     emit("AP:    ap -s <ssid> [-p pw] start\n");
     emit("       ap stop | ap status\n");
-    emit("Net:   net s | net s p <host> <ports>\n");
+    emit("Net:   net s | net s p <host> [ports]\n");
     emit("       ping <host> [n]\n");
     emit("       wget <url> [-o path]\n");
     emit("       httpd [start [path]|stop|status]\n");

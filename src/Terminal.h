@@ -1428,7 +1428,7 @@ public:
         if (c == "ping")   return "Usage: ping <host|ip|url> [count]\n";
         if (c == "wget")   return "Usage: wget <url> [-o <path>]\n";
         if (c == "wf c")   return "Usage: wf c <ssid> [-p <password>]\n";
-        if (c == "net s p")return "Usage: net s p <host|ip|url> <port|a-b>...\n";
+        if (c == "net s p")return "Usage: net s p <host|ip|url> [port|a-b]...\n";
         return "";
     }
 
@@ -2054,17 +2054,11 @@ public:
                 NetworkCmds::ping(toks[0], count, emit);
             }
             else if (cmd.rfind("net s p ", 0) == 0) {
-                // net s p <host|ip|url> <port|range>...
-                //   individual ports:  net s p 192.168.1.1 21 22 80 8080
-                //   range:             net s p scanme.nmap.org 21-80
-                //   can be mixed:      net s p example.com 22 80 1000-1010
+                // net s p <host|ip|url> [port|range...]
+                //   with ports:    net s p 192.168.1.1 21 22 80 8080
+                //   a range:       net s p scanme.nmap.org 21-80
+                //   no ports:      net s p example.com   (scans the top 1000)
                 auto tokens = split_ws(cmd.substr(8));
-
-                if (tokens.size() < 2) {
-                    emit("Usage: net s p <host|ip|url> <port|a-b>...\n");
-                    Helpers::cmd_status = 1;
-                    return;
-                }
 
                 IPAddress ip;
                 std::string host;
@@ -2075,6 +2069,14 @@ public:
                     else              emit("net s p: cannot resolve " + host + "\n");
                     Helpers::cmd_status = 1;
                     return;
+                }
+
+                // Port arguments follow the host; if none are given, scan the
+                // built-in list of the ~1000 most common ports.
+                std::vector<std::string> portArgs(tokens.begin() + 1, tokens.end());
+                if (portArgs.empty()) {
+                    portArgs = split_ws(NetworkCmds::default_ports());
+                    emit("No ports given, scanning top 1000...\n");
                 }
 
                 const size_t MAX_PORTS = 1024;
@@ -2089,8 +2091,8 @@ public:
                 };
 
                 bool bad = false;
-                for (size_t i = 1; i < tokens.size() && !truncated; ++i) {
-                    const std::string& tok = tokens[i];
+                for (size_t i = 0; i < portArgs.size() && !truncated; ++i) {
+                    const std::string& tok = portArgs[i];
                     size_t dash = tok.find('-');
 
                     if (dash != std::string::npos) {
