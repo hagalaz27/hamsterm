@@ -6,6 +6,7 @@
 #include <LittleFS.h>
 #include <SD.h>
 #include <WiFi.h>
+#include <HTTPClient.h>
 
 // Human-readable size: B / K / M / G.
 static std::string humanBytes(uint64_t b) {
@@ -36,7 +37,7 @@ void SystemCmds::help(LineCallback emit) {
     emit("AP:    ap -s <ssid> [-p pw] start\n");
     emit("       ap stop | ap status\n");
     emit("Net:   net s | net s p <host> [ports]\n");
-    emit("       ping <host> [n]\n");
+    emit("       ping [-c N] <host>\n");
     emit("       wget <url> [-o path]\n");
     emit("       httpd [start [path]|stop|status]\n");
     emit("       telnet <host> [port]\n");
@@ -63,6 +64,32 @@ void SystemCmds::help(LineCallback emit) {
     emit("       Fn+;/. = history\n");
     emit("       Fn+,// = cursor\n");
     emit("       Ctrl+;/. = scroll\n");
+}
+
+// Query the public (WAN) IP from an external service. Returns "" on any
+// failure or timeout. Blocking, with a short timeout so sysinfo stays snappy.
+static std::string fetch_wan_ip() {
+    if (WiFi.status() != WL_CONNECTED) return "";
+    HTTPClient http;
+    WiFiClient client;
+    if (!http.begin(client, "http://api.ipify.org")) return "";
+    http.setUserAgent("hamsTerm/1.0");
+    http.setConnectTimeout(3000);
+    http.setTimeout(3000);
+    std::string out;
+    if (http.GET() == HTTP_CODE_OK) {
+        String s = http.getString();
+        s.trim();
+        // sanity: looks like an IPv4 (digits and dots, short)
+        bool ok = s.length() >= 7 && s.length() <= 15;
+        for (size_t i = 0; ok && i < s.length(); ++i) {
+            char c = s[i];
+            if (!((c >= '0' && c <= '9') || c == '.')) ok = false;
+        }
+        if (ok) out = std::string(s.c_str());
+    }
+    http.end();
+    return out;
 }
 
 void SystemCmds::sysinfo(LineCallback emit) {
@@ -104,14 +131,34 @@ void SystemCmds::sysinfo(LineCallback emit) {
              s / 3600UL, (s % 3600UL) / 60UL, s % 60UL);
     emit(buf);
 
-    if (WiFi.status() == WL_CONNECTED) {
-        snprintf(buf, sizeof(buf), "WiFi: %s\n", WiFi.SSID().c_str());
+    bool sta = (WiFi.status() == WL_CONNECTED);
+    wifi_mode_t mode = WiFi.getMode();
+    bool apUp = (mode == WIFI_MODE_AP || mode == WIFI_MODE_APSTA);
+
+    if (sta) {
+        snprintf(buf, sizeof(buf), "WiFi: %s (RSSI %d)\n",
+                 WiFi.SSID().c_str(), (int)WiFi.RSSI());
         emit(buf);
-        snprintf(buf, sizeof(buf), "IP: %s (RSSI %d)\n",
-                 WiFi.localIP().toString().c_str(), (int)WiFi.RSSI());
+        snprintf(buf, sizeof(buf), "LAN IP: %s\n",
+                 WiFi.localIP().toString().c_str());
         emit(buf);
     } else {
         emit("WiFi: not connected\n");
+    }
+
+    if (apUp) {
+        snprintf(buf, sizeof(buf), "AP IP:  %s\n",
+                 WiFi.softAPIP().toString().c_str());
+        emit(buf);
+    }
+
+    // WAN IP needs an external request; only attempt it when connected as a
+    // station (AP-only mode has no route to the internet).
+    if (sta) {
+        std::string wan = fetch_wan_ip();
+        snprintf(buf, sizeof(buf), "WAN IP: %s\n",
+                 wan.empty() ? "n/a" : wan.c_str());
+        emit(buf);
     }
 }
 

@@ -1425,7 +1425,7 @@ public:
         if (c == "rmdir")  return "Usage: rmdir <dir>...\n";
         if (c == "touch")  return "Usage: touch <file>...\n";
         if (c == "unset")  return "Usage: unset <NAME>\n";
-        if (c == "ping")   return "Usage: ping <host|ip|url> [count]\n";
+        if (c == "ping")   return "Usage: ping [-c N] <host|ip|url>\n";
         if (c == "wget")   return "Usage: wget <url> [-o <path>]\n";
         if (c == "wf c")   return "Usage: wf c <ssid> [-p <password>]\n";
         if (c == "net s p")return "Usage: net s p <host|ip|url> [port|a-b]...\n";
@@ -2038,20 +2038,29 @@ public:
                 }
             }
             else if (cmd.rfind("ping ", 0) == 0) {
-                // ping <host|ip|url> [count]
-                //   ping https://www.google.com
-                //   ping 192.168.0.185
-                //   ping google.com 8
-                // Bare "ping" -> usage_for(); here there is always a target token.
+                // ping [-c N] <host|ip|url>   (no -c => ping until Ctrl+C)
+                //   ping google.com
+                //   ping -c 5 192.168.0.1
+                //   ping https://example.com -c 10
                 auto toks = split_ws(cmd.substr(5));
-                uint8_t count = 4;
-                if (toks.size() >= 2) {
-                    long c;
-                    if (parse_uint(toks[1], c) && c >= 1 && c <= 30) {
-                        count = static_cast<uint8_t>(c);
+                std::string target;
+                uint32_t count = 0; // 0 = infinite
+                for (size_t i = 0; i < toks.size(); ++i) {
+                    if (toks[i] == "-c" && i + 1 < toks.size()) {
+                        long c;
+                        if (parse_uint(toks[i + 1], c) && c >= 1 && c <= 1000000)
+                            count = (uint32_t)c;
+                        ++i; // consume the number
+                    } else if (target.empty() && !toks[i].empty() && toks[i][0] != '-') {
+                        target = toks[i];
                     }
                 }
-                NetworkCmds::ping(toks[0], count, emit);
+                if (target.empty()) {
+                    emit("Usage: ping [-c N] <host|ip|url>\n");
+                    Helpers::cmd_status = 1;
+                    return;
+                }
+                NetworkCmds::ping(target, count, emit);
             }
             else if (cmd.rfind("net s p ", 0) == 0) {
                 // net s p <host|ip|url> [port|range...]

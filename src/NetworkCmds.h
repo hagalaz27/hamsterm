@@ -17,7 +17,8 @@ class NetworkCmds {
 public:
     static void net_scan(LineCallback emit);
     static void net_scan_ports(const IPAddress ip, const std::vector<uint16_t>& ports, LineCallback emit);
-    static void ping(const std::string& target, uint8_t count, LineCallback emit);
+    // Ping a host. count == 0 means ping forever (until Ctrl+C).
+    static void ping(const std::string& target, uint32_t count, LineCallback emit);
 
     // Resolve a host|ip|url target to an IPAddress. Return code:
     //   0 = ok (out set), 1 = empty/invalid target,

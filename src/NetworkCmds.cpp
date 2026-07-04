@@ -1,5 +1,7 @@
 #include "NetworkCmds.h"
 #include "Helpers.h"
+#include <M5Cardputer.h>
+#include <math.h>
 
 void NetworkCmds::net_scan(LineCallback emit) {
     if (WiFi.status() != WL_CONNECTED) {
@@ -284,7 +286,23 @@ const char* NetworkCmds::default_ports() {
         "7001 8008 9080";
 }
 
-void NetworkCmds::ping(const std::string& target, uint8_t count, LineCallback emit) {
+// Poll the keyboard for Ctrl+C so a running ping can be stopped (like Linux).
+static bool ping_break_pressed() {
+    M5Cardputer.update();
+    auto& kb = M5Cardputer.Keyboard;
+    if (kb.isPressed()) {
+        Keyboard_Class::KeysState st = kb.keysState();
+        if (st.ctrl) {
+            for (auto c : st.word) {
+                char lc = (c >= 'A' && c <= 'Z') ? (char)(c + 32) : c;
+                if (lc == 'c') return true;
+            }
+        }
+    }
+    return false;
+}
+
+void NetworkCmds::ping(const std::string& target, uint32_t count, LineCallback emit) {
     if (WiFi.status() != WL_CONNECTED) {
         emit("Not connected to WiFi\n");
         Helpers::cmd_status = 1;
@@ -314,23 +332,38 @@ void NetworkCmds::ping(const std::string& target, uint8_t count, LineCallback em
     emit(buf);
 
     int sent = 0, recv = 0;
-    float totalTime = 0.0f;
+    float sum = 0.0f, sumSq = 0.0f, minT = 0.0f, maxT = 0.0f;
+    bool interrupted = false;
 
-    for (uint8_t i = 0; i < count; i++) {
+    for (uint32_t i = 0; count == 0 || i < count; i++) {
+        if (ping_break_pressed()) { interrupted = true; break; }
+
         sent++;
         bool ok = Ping.ping(ip, 1); // single echo request
         if (ok) {
             float t = Ping.averageTime(); // time of the last ping, ms
             recv++;
-            totalTime += t;
-            snprintf(buf, sizeof(buf), "Reply from %s: time=%.1f ms\n",
-                     ip.toString().c_str(), t);
+            sum += t;
+            sumSq += t * t;
+            if (recv == 1 || t < minT) minT = t;
+            if (recv == 1 || t > maxT) maxT = t;
+            snprintf(buf, sizeof(buf), "Reply from %s: icmp_seq=%d time=%.1f ms\n",
+                     ip.toString().c_str(), sent, t);
         } else {
-            snprintf(buf, sizeof(buf), "Request timed out\n");
+            snprintf(buf, sizeof(buf), "Request timed out: icmp_seq=%d\n", sent);
         }
         emit(buf);
-        delay(100); // small gap + watchdog-friendly
+
+        // gap between pings, staying responsive to Ctrl+C
+        bool last = (count != 0 && i + 1 >= count);
+        for (int d = 0; d < 5 && !last; d++) {
+            if (ping_break_pressed()) { interrupted = true; break; }
+            delay(60);
+        }
+        if (interrupted) break;
     }
+
+    if (interrupted) emit("^C\n");
 
     int loss = (sent > 0) ? (100 * (sent - recv) / sent) : 0;
     snprintf(buf, sizeof(buf),
@@ -339,7 +372,13 @@ void NetworkCmds::ping(const std::string& target, uint8_t count, LineCallback em
     emit(buf);
 
     if (recv > 0) {
-        snprintf(buf, sizeof(buf), "avg = %.1f ms\n", totalTime / recv);
+        float avg = sum / recv;
+        float var = (sumSq / recv) - (avg * avg);
+        if (var < 0.0f) var = 0.0f; // guard against floating-point rounding
+        float mdev = sqrtf(var);
+        snprintf(buf, sizeof(buf),
+                 "rtt min/avg/max/mdev = %.1f/%.1f/%.1f/%.1f ms\n",
+                 minT, avg, maxT, mdev);
         emit(buf);
     } else {
         Helpers::cmd_status = 1; // 100% loss = failure (like real ping)
