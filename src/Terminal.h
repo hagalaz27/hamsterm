@@ -10,6 +10,7 @@
 #include <cerrno>
 #include "CommonCmds.h"
 #include "NetworkCmds.h"
+#include "AirCmds.h"
 #include "WiFiCmds.h"
 #include "SystemCmds.h"
 #include "HttpdCmds.h"
@@ -30,6 +31,7 @@ private:
     std::vector<std::string> history;
     int max_history = 100;
     int scroll_offset = 0;
+    bool liveCommand = false; // true while a long-running command (air w) draws output
     int lines_on_screen = 10;
     int commandNumber = -1;
     std::string previousValue = "";
@@ -508,7 +510,7 @@ public:
             M5Cardputer.Display.println(history[i].c_str());
         }
 
-        if (scroll_offset == 0) {
+        if (scroll_offset == 0 && !liveCommand) {
             M5Cardputer.Display.print(prompt.c_str());
             M5Cardputer.Display.print(command.c_str());
             // Derive the input's first row by counting back from the END cursor
@@ -872,6 +874,28 @@ public:
     void ssh_arrow(const char* s) { if (sshActive && ssh) ssh->sendStr(s); }
     void ssh_scroll_up()          { if (sshActive && ssh) ssh->scrollUp(); }
     void ssh_scroll_down()        { if (sshActive && ssh) ssh->scrollDown(); }
+
+    // Input poll used by long-running "air" commands: Ctrl+;/. scroll the
+    // scrollback, Ctrl+C requests a stop. Returns true when Ctrl+C is pressed.
+    bool air_poll() {
+        M5Cardputer.update();
+        auto& kb = M5Cardputer.Keyboard;
+        if (kb.isChange() && kb.isPressed()) {
+            Keyboard_Class::KeysState st = kb.keysState();
+            if (st.ctrl) {
+                if (kb.isKeyPressed(':')) { scroll_up();   return false; } // Ctrl+; (up)
+                if (kb.isKeyPressed('>')) { scroll_down(); return false; } // Ctrl+. (down)
+                for (auto c : st.word) {
+                    char lc = (c >= 'A' && c <= 'Z') ? (char)(c + 32) : c;
+                    if (lc == 'c') {
+                        if (scroll_offset != 0) { scroll_offset = 0; refresh_screen(); }
+                        return true;
+                    }
+                }
+            }
+        }
+        return false;
+    }
     void ssh_disconnect()         { if (sshActive) ssh_teardown(); }
 
     void handle_keypress(uint8_t key) {
@@ -946,7 +970,9 @@ public:
 
     void print(const std::string& text) {
         add_to_history(text);
-        M5Cardputer.Display.print(text.c_str());
+        // When the user has scrolled up (offset > 0), keep buffering into history
+        // but don't paint over their scrolled view; scrolling back down redraws.
+        if (scroll_offset == 0) M5Cardputer.Display.print(text.c_str());
     }
 
     // Generic parsing of output redirection (> and >>).
@@ -1426,6 +1452,8 @@ public:
         if (c == "touch")  return "Usage: touch <file>...\n";
         if (c == "unset")  return "Usage: unset <NAME>\n";
         if (c == "ping")   return "Usage: ping [-c N] <host|ip|url>\n";
+        if (c == "air" || c == "air s") return "Usage: air s [seconds]\n";
+        if (c == "air w") return "Usage: air w <ssid|bssid>\n";
         if (c == "wget")   return "Usage: wget <url> [-o <path>]\n";
         if (c == "wf c")   return "Usage: wf c <ssid> [-p <password>]\n";
         if (c == "net s p")return "Usage: net s p <host|ip|url> [port|a-b]...\n";
@@ -2061,6 +2089,30 @@ public:
                     return;
                 }
                 NetworkCmds::ping(target, count, emit);
+            }
+            else if (cmd == "air s" || cmd.rfind("air s ", 0) == 0) {
+                // air s [seconds] - passive 802.11 monitor (default 60s).
+                uint32_t secs = 60;
+                if (cmd.rfind("air s ", 0) == 0) {
+                    std::string arg = cmd.substr(6);
+                    Helpers::trim(arg);
+                    long s;
+                    if (parse_uint(arg, s) && s >= 1 && s <= 300) secs = (uint32_t)s;
+                }
+                AirCmds::sniff(secs, emit);
+            }
+            else if (cmd == "air w" || cmd.rfind("air w ", 0) == 0) {
+                // air w <ssid|bssid> - live monitor of one AP.
+                std::string arg = (cmd.size() > 6) ? cmd.substr(6) : "";
+                Helpers::trim(arg);
+                if (arg.empty()) {
+                    emit("Usage: air w <ssid|bssid>\n");
+                    Helpers::cmd_status = 1;
+                    return;
+                }
+                liveCommand = true;
+                AirCmds::watch(arg, 60, emit, [this]() { return air_poll(); });
+                liveCommand = false;
             }
             else if (cmd.rfind("net s p ", 0) == 0) {
                 // net s p <host|ip|url> [port|range...]

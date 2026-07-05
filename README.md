@@ -39,6 +39,10 @@ shell-style globbing, and user variables - all driven from the device keyboard.
 - **Wi-Fi & network:** scan, connect, `ping`, local network + port scan
   (`net s p <host> [ports]`, defaults to the top 1000; open ports are labelled
   with their likely service)
+- **Air monitor:** `air s [seconds]` - passive 802.11 sniffer that hops the
+  channels and reports access points, their clients, and probing stations; and
+  `air w <ssid|bssid>` - live view of who joins/leaves a single AP
+  (read-only; drops the Wi-Fi link while running)
 - **Downloads:** `wget <url> [-o path]` - fetch a file over HTTP/HTTPS (streamed to flash or `/sd`)
 - **Access point:** host a Wi-Fi AP with `ap -s ssid [-p pass] start` (open or WPA2)
 - **telnet / nc:** interactive client with local line editing, ANSI handling
