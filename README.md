@@ -32,6 +32,13 @@ shell-style globbing, and user variables - all driven from the device keyboard.
   parentheses, unary minus and variables (`$((i+1))`, `$(((a+b)*2))`). Inside the
   parentheses a bare name means that variable. Enables counters in loops:
   `i=$((i+1))`. Division/modulo by zero yields 0.
+- **Command substitution:** `$( ... )` captures a command's output (trailing
+  newlines trimmed) for use in another command or a variable: `today=$(date)`,
+  `for f in $(ls /sd); do ...`. Pipes, redirection and nesting work inside; output
+  is capped at 4 KB and Ctrl+C aborts a running script.
+- **Interactive input:** `read [-p prompt] name...` pauses for a typed line and
+  stores it (multiple names split the input by words, the last gets the rest) -
+  the basis for prompts, menus and confirmations in scripts. Ctrl+C cancels.
 - **Pipes, redirection & logic:** `>`, `>>`, `| grep`, and `&&` / `||` for
   conditional chains (`cmd1 && cmd2` runs the second only if the first succeeded;
   `cmd1 || cmd2` only if it failed) - works at the prompt and in scripts

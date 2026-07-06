@@ -48,6 +48,7 @@ void SystemCmds::help(LineCallback emit) {
     emit("Sys:   help sysinfo free battery\n");
     emit("       reboot | sh [-v] <file> [args]\n");
     emit("Vars:  set [NAME val] | NAME=val\n");
+    emit("       read [-p ask] name...\n");
     emit("       unset NAME | $NAME expands\n");
     emit("       $1..$9 $@ $# (script args)\n");
     emit("       $? = last exit code\n");
@@ -60,6 +61,7 @@ void SystemCmds::help(LineCallback emit) {
     emit("       for x in ...; do ...; done\n");
     emit("Range: {1..5} {0..10..2}\n");
     emit("Math:  $((i+1)) + - * / %\n");
+    emit("Subst: x=$(cmd)  $(cmd)\n");
     emit("       -e -f -d -s -z -n\n");
     emit("       = != -eq -lt -gt ...\n");
     emit("Keys:  Tab=complete\n");

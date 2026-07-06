@@ -26,6 +26,11 @@ private:
     int inputStartY = 0;                   // screen Y of the input line's first row
     int scriptDepth = 0;                   // nesting depth of running scripts (sh)
     int chainDepth = 0;                    // depth of &&/|| chain expansion
+    bool capturing = false;                // command substitution: route output to a buffer
+    std::string captureBuf;                // buffer for the current $(...) capture
+    bool scriptInterrupted = false;        // Ctrl+C during a script aborts the rest of it
+    static const size_t CAPTURE_CAP = 4096; // max bytes kept from a $(...) command
+    using CaptureFn = std::function<std::string(const std::string&)>;
     std::vector<std::string> scriptArgs;   // positional params: [0]=$0 (name), [1..]=$1..
     std::string prompt = ">";
     std::vector<std::string> history;
@@ -130,12 +135,14 @@ public:
     // Split a line on top-level ';' (command separator), honoring quotes.
     static std::vector<std::string> split_semicolons(const std::string& in) {
         std::vector<std::string> out;
-        std::string cur; char quote = 0;
+        std::string cur; char quote = 0; int paren = 0;
         for (size_t i = 0; i < in.size(); ++i) {
             char c = in[i];
             if (quote) { cur += c; if (c == quote) quote = 0; continue; }
             if (c == '"' || c == '\'') { quote = c; cur += c; continue; }
-            if (c == ';') { out.push_back(cur); cur.clear(); continue; }
+            if (c == '(') { paren++; cur += c; continue; }
+            if (c == ')') { if (paren > 0) paren--; cur += c; continue; }
+            if (c == ';' && paren == 0) { out.push_back(cur); cur.clear(); continue; }
             cur += c;
         }
         out.push_back(cur);
@@ -329,7 +336,7 @@ public:
             if (!go) break;
             run_block(L, doIdx + 1, doneIdx, verbose);
         }
-        if (aborted) { print("^C\n"); Helpers::cmd_status = 130; }
+        if (aborted) { print("^C\n"); Helpers::cmd_status = 130; scriptInterrupted = true; }
         return doneIdx + 1;
     }
 
@@ -364,7 +371,8 @@ public:
 
         // Expand variables then globs, then split into words. The "_ " prefix
         // gives expand_globs a dummy command at index 0 (it never globs token 0).
-        std::string le = expand_vars(listRaw, vars, scriptArgs, Helpers::cmd_status);
+        std::string le = expand_vars(listRaw, vars, scriptArgs, Helpers::cmd_status,
+                                     [this](const std::string& c) { return run_capture(c); });
         Helpers::cmd_status = 0;
         le = CommonCmds::expand_braces(le);   // {1..5} / {0..10..2}
         std::string lg = CommonCmds::expand_globs("_ " + le);
@@ -378,7 +386,7 @@ public:
             vars[var] = w;                 // set loop variable
             run_block(L, doIdx + 1, doneIdx, verbose);
         }
-        if (aborted) { print("^C\n"); Helpers::cmd_status = 130; }
+        if (aborted) { print("^C\n"); Helpers::cmd_status = 130; scriptInterrupted = true; }
         return doneIdx + 1;
     }
 
@@ -389,6 +397,7 @@ public:
                    bool verbose) {
         size_t pc = lo;
         while (pc < hi) {
+            if (scriptInterrupted) return; // Ctrl+C aborts the rest of the script
             ScriptKw kw = script_kw(L[pc]);
             if (kw == ScriptKw::IF) {
                 pc = run_if(L, pc, hi, verbose);
@@ -433,6 +442,7 @@ public:
 
         std::vector<std::string> savedArgs = scriptArgs; // save caller's params
         scriptArgs = args;
+        if (scriptDepth == 0) scriptInterrupted = false; // fresh start for a top-level script
         scriptDepth++;
 
         // Read the whole file into raw lines, then interpret as a block so that
@@ -875,6 +885,117 @@ public:
     void ssh_scroll_up()          { if (sshActive && ssh) ssh->scrollUp(); }
     void ssh_scroll_down()        { if (sshActive && ssh) ssh->scrollDown(); }
 
+    // Erase the last echoed character from the display (handles a wrap back to
+    // the previous row).
+    void read_erase_char() {
+        const int cw = 7, chh = 14;
+        int cx = M5Cardputer.Display.getCursorX();
+        int cy = M5Cardputer.Display.getCursorY();
+        if (cx >= cw) {
+            M5Cardputer.Display.setCursor(cx - cw, cy);
+            M5Cardputer.Display.print(" ");
+            M5Cardputer.Display.setCursor(cx - cw, cy);
+        } else if (cy >= chh) {
+            int cpr = M5Cardputer.Display.width() / cw; if (cpr < 1) cpr = 1;
+            int x = (cpr - 1) * cw;
+            M5Cardputer.Display.setCursor(x, cy - chh);
+            M5Cardputer.Display.print(" ");
+            M5Cardputer.Display.setCursor(x, cy - chh);
+        }
+    }
+
+    // Read one line from the keyboard (for the `read` command). Echoes input,
+    // supports Backspace. Returns false if cancelled with Ctrl+C. The prompt is
+    // drawn live; the whole line is added to the scrollback when Enter is hit.
+    bool read_line(const std::string& promptText, std::string& out) {
+        // Let the key that launched us (usually Enter) release first.
+        while (M5Cardputer.Keyboard.isPressed()) { M5Cardputer.update(); delay(10); }
+
+        if (!promptText.empty()) M5Cardputer.Display.print(promptText.c_str());
+
+        std::string input;
+        bool cancelled = false;
+        while (true) {
+            M5Cardputer.update();
+            auto& kb = M5Cardputer.Keyboard;
+            if (kb.isChange() && kb.isPressed()) {
+                Keyboard_Class::KeysState st = kb.keysState();
+                if (st.ctrl) {
+                    bool ctrlC = false;
+                    for (auto c : st.word) {
+                        char lc = (c >= 'A' && c <= 'Z') ? (char)(c + 32) : c;
+                        if (lc == 'c') ctrlC = true;
+                    }
+                    if (ctrlC) { cancelled = true; break; }
+                }
+                if (st.enter) break;
+                if (st.del) {
+                    if (!input.empty()) { input.pop_back(); read_erase_char(); }
+                } else if (!st.word.empty()) {
+                    for (auto c : st.word) {
+                        input += (char)c;
+                        char one[2] = { (char)c, 0 };
+                        M5Cardputer.Display.print(one);
+                    }
+                }
+            }
+            delay(10);
+        }
+        M5Cardputer.Display.println();
+        add_to_history(promptText + input + "\n"); // record the whole line once
+        out = input;
+        return !cancelled;
+    }
+
+    // read [-p prompt] [name...]  - read a line into variables (last gets the
+    // remainder). No names -> $REPLY. Ctrl+C cancels (aborts a script).
+    void do_read(const std::string& argStr, LineCallback emit) {
+        auto toks = split_ws(argStr);
+        std::string promptText;
+        std::vector<std::string> names;
+        for (size_t i = 0; i < toks.size(); ++i) {
+            if (toks[i] == "-p" && i + 1 < toks.size()) { promptText = toks[i + 1]; ++i; }
+            else if (!toks[i].empty() && toks[i][0] == '-') { /* unknown flag: ignore */ }
+            else names.push_back(toks[i]);
+        }
+        if (names.empty()) names.push_back("REPLY");
+        for (const auto& n : names) {
+            if (!valid_var_name(n)) {
+                emit("read: invalid name: " + n + "\n");
+                Helpers::cmd_status = 1; return;
+            }
+        }
+
+        std::string input;
+        if (!read_line(promptText, input)) { // Ctrl+C
+            Helpers::cmd_status = 1;
+            scriptInterrupted = true;
+            return;
+        }
+
+        // Split on whitespace (no quote processing - input is literal) and assign;
+        // the last name receives the remaining words joined by single spaces.
+        std::vector<std::string> words;
+        { std::string cur;
+          for (char c : input) {
+              if (c == ' ' || c == '\t') { if (!cur.empty()) { words.push_back(cur); cur.clear(); } }
+              else cur += c;
+          }
+          if (!cur.empty()) words.push_back(cur);
+        }
+        for (size_t i = 0; i < names.size(); ++i) {
+            if (i + 1 == names.size()) {
+                std::string rest;
+                for (size_t j = i; j < words.size(); ++j) { if (j > i) rest += " "; rest += words[j]; }
+                vars[names[i]] = rest;
+            } else {
+                vars[names[i]] = (i < words.size()) ? words[i] : "";
+            }
+        }
+        save_vars();
+        Helpers::cmd_status = 0;
+    }
+
     // Input poll used by long-running "air" commands: Ctrl+;/. scroll the
     // scrollback, Ctrl+C requests a stop. Returns true when Ctrl+C is pressed.
     bool air_poll() {
@@ -969,6 +1090,13 @@ public:
     }
 
     void print(const std::string& text) {
+        // Command substitution: collect output into a buffer (capped) instead
+        // of drawing it, and don't touch the scrollback.
+        if (capturing) {
+            if (captureBuf.size() < CAPTURE_CAP)
+                captureBuf.append(text, 0, CAPTURE_CAP - captureBuf.size());
+            return;
+        }
         add_to_history(text);
         // When the user has scrolled up (offset > 0), keep buffering into history
         // but don't paint over their scrolled view; scrolling back down redraws.
@@ -1104,12 +1232,42 @@ public:
         return v;
     }
 
+    // Run a command with its output captured into a string (for $(...) command
+    // substitution). Re-entrant (supports nesting). Trailing newlines trimmed,
+    // like a shell. Output is capped at CAPTURE_CAP bytes.
+    std::string run_capture(const std::string& innerCmd) {
+        if (scriptDepth >= 8) return std::string(); // refuse pathologically deep $()
+        bool savedCapturing = capturing;
+        std::string savedBuf = captureBuf;
+        std::string savedCommand = command;
+
+        capturing = true;
+        captureBuf.clear();
+        command = innerCmd;
+        scriptDepth++;              // silence echo/history/prompt of the inner command
+        execute_command();
+        scriptDepth--;
+
+        std::string result = captureBuf;
+
+        command = savedCommand;
+        captureBuf = savedBuf;
+        capturing = savedCapturing;
+
+        if (Helpers::cmd_status == 130) scriptInterrupted = true; // Ctrl+C inside $()
+
+        while (!result.empty() && (result.back() == '\n' || result.back() == '\r'))
+            result.pop_back();
+        return result;
+    }
+
     // Expand $NAME and ${NAME} against the given variables. Undefined names
     // expand to an empty string (like a typical shell). "\$" yields a literal $.
     static std::string expand_vars(const std::string& in,
                                    const std::map<std::string, std::string>& vars,
                                    const std::vector<std::string>& args,
-                                   int status) {
+                                   int status,
+                                   const CaptureFn& cap) {
         std::string out;
         out.reserve(in.size());
         size_t i = 0;
@@ -1133,7 +1291,7 @@ public:
                     }
                     if (closed && k + 1 < in.size() && in[k + 1] == ')') {
                         std::string expr = in.substr(i + 3, k - (i + 3));
-                        std::string inner = expand_vars(expr, vars, args, status);
+                        std::string inner = expand_vars(expr, vars, args, status, cap);
                         bool aerr = false;
                         long v = eval_arith(inner, vars, aerr);
                         out += std::to_string(v); // malformed/div0 -> 0
@@ -1141,6 +1299,26 @@ public:
                         continue;
                     }
                     // not a well-formed $(( )) -> fall through to literal handling
+                }
+                // $( CMD ) - command substitution (not $(( )), handled above).
+                if (i + 1 < in.size() && in[i + 1] == '(' &&
+                    (i + 2 >= in.size() || in[i + 2] != '(')) {
+                    size_t k = i + 2; int depth = 0; char q = 0; bool closed = false;
+                    while (k < in.size()) {
+                        char d = in[k];
+                        if (q) { if (d == q) q = 0; }
+                        else if (d == '"' || d == '\'') q = d;
+                        else if (d == '(') depth++;
+                        else if (d == ')') { if (depth == 0) { closed = true; break; } depth--; }
+                        k++;
+                    }
+                    if (closed) {
+                        std::string innerCmd = in.substr(i + 2, k - (i + 2));
+                        if (cap) out += cap(innerCmd); // run + capture (trailing \n trimmed)
+                        i = k + 1; // skip the ')'
+                        continue;
+                    }
+                    // unclosed -> fall through to literal '$'
                 }
                 size_t j = i + 1;
                 bool braced = false;
@@ -1516,12 +1694,19 @@ public:
         // Run it like a mini-script (silent body, one prompt after).
         {
             ScriptKw k0 = script_kw(cmd);
-            if (k0 == ScriptKw::IF || k0 == ScriptKw::WHILE ||
-                k0 == ScriptKw::UNTIL || k0 == ScriptKw::FOR) {
+            bool compound = (k0 == ScriptKw::IF || k0 == ScriptKw::WHILE ||
+                             k0 == ScriptKw::UNTIL || k0 == ScriptKw::FOR);
+            // A line with a top-level ';' is several statements - run it through
+            // the same block interpreter so `a; b`, `x=$(cmd); echo $x`, and
+            // one-line if/for all work at the prompt, not just in scripts.
+            bool multiStmt = compound || split_semicolons(cmd).size() > 1;
+            if (multiStmt) {
+                scriptInterrupted = false;
                 scriptDepth++;
                 auto lines = flatten_script(std::vector<std::string>{cmd});
                 run_block(lines, 0, lines.size(), false);
                 scriptDepth--;
+                scriptInterrupted = false;
                 print_prompt();
                 return;
             }
@@ -1559,7 +1744,8 @@ public:
         // before anything else. $? must read the PREVIOUS command's status, so
         // we expand first and only then reset it to 0 (success) for this command;
         // a command that fails sets Helpers::cmd_status back to non-zero.
-        cmd = expand_vars(cmd, vars, scriptArgs, Helpers::cmd_status);
+        cmd = expand_vars(cmd, vars, scriptArgs, Helpers::cmd_status,
+                          [this](const std::string& c) { return run_capture(c); });
         Helpers::cmd_status = 0;
 
         // Variable management (set / unset / NAME=value) is handled here,
@@ -1895,6 +2081,9 @@ public:
                     text = joined;
                 }
                 CommonCmds::echo(text, file, append, emit);
+            }
+            else if (cmd == "read" || cmd.rfind("read ", 0) == 0) {
+                do_read(cmd == "read" ? std::string() : cmd.substr(5), emit);
             }
             else if (cmd == "test" || cmd.rfind("test ", 0) == 0 ||
                      cmd == "[" || cmd.rfind("[ ", 0) == 0) {
