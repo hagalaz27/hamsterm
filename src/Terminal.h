@@ -11,6 +11,7 @@
 #include "CommonCmds.h"
 #include "NetworkCmds.h"
 #include "AirCmds.h"
+#include "HwCmds.h"
 #include "WiFiCmds.h"
 #include "SystemCmds.h"
 #include "HttpdCmds.h"
@@ -1632,6 +1633,8 @@ public:
         if (c == "ping")   return "Usage: ping [-c N] <host|ip|url>\n";
         if (c == "air" || c == "air s") return "Usage: air s [seconds]\n";
         if (c == "air w") return "Usage: air w <ssid|bssid>\n";
+        if (c == "led")   return "Usage: led <r|g|b|y|c|m|w|off> [count] [dur] [gap]\n";
+        if (c == "beep")  return "Usage: beep [count] [dur] [gap]\n";
         if (c == "wget")   return "Usage: wget <url> [-o <path>]\n";
         if (c == "wf c")   return "Usage: wf c <ssid> [-p <password>]\n";
         if (c == "net s p")return "Usage: net s p <host|ip|url> [port|a-b]...\n";
@@ -2302,6 +2305,37 @@ public:
                 liveCommand = true;
                 AirCmds::watch(arg, 60, emit, [this]() { return air_poll(); });
                 liveCommand = false;
+            }
+            else if (cmd == "beep" || cmd.rfind("beep ", 0) == 0) {
+                // beep [count] [dur] [gap]   (gap defaults to dur)
+                auto toks = split_ws(cmd == "beep" ? std::string() : cmd.substr(5));
+                long count = 1, dur = 150, gap = -1, v;
+                if (toks.size() >= 1 && parse_uint(toks[0], v) && v >= 1 && v <= 100)   count = v;
+                if (toks.size() >= 2 && parse_uint(toks[1], v) && v >= 1 && v <= 5000)  dur = v;
+                if (toks.size() >= 3 && parse_uint(toks[2], v) && v >= 0 && v <= 5000)  gap = v;
+                if (gap < 0) gap = dur;
+                HwCmds::beep((uint16_t)count, (uint16_t)dur, (uint16_t)gap, emit);
+                if (Helpers::cmd_status == 130) scriptInterrupted = true;
+            }
+            else if (cmd == "led" || cmd.rfind("led ", 0) == 0) {
+                // led <color> [count] [dur] [gap]   |   led <color>   |   led off
+                auto toks = split_ws(cmd == "led" ? std::string() : cmd.substr(4));
+                if (toks.empty()) {
+                    emit(usage_for("led"));
+                    Helpers::cmd_status = 1;
+                    return;
+                }
+                if (toks.size() == 1) {
+                    HwCmds::led_set(toks[0], emit); // hold colour (or off)
+                } else {
+                    long count = 1, dur = 150, gap = -1, v;
+                    if (toks.size() >= 2 && parse_uint(toks[1], v) && v >= 1 && v <= 100)  count = v;
+                    if (toks.size() >= 3 && parse_uint(toks[2], v) && v >= 1 && v <= 5000) dur = v;
+                    if (toks.size() >= 4 && parse_uint(toks[3], v) && v >= 0 && v <= 5000) gap = v;
+                    if (gap < 0) gap = dur;
+                    HwCmds::led_blink(toks[0], (uint16_t)count, (uint16_t)dur, (uint16_t)gap, emit);
+                    if (Helpers::cmd_status == 130) scriptInterrupted = true;
+                }
             }
             else if (cmd.rfind("net s p ", 0) == 0) {
                 // net s p <host|ip|url> [port|range...]

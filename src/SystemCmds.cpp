@@ -39,6 +39,8 @@ void SystemCmds::help(LineCallback emit) {
     emit("Net:   net s | net s p <host> [ports]\n");
     emit("       air s [secs]\n");
     emit("       air w <ssid|bssid>\n");
+    emit("Sig:   beep [n] [dur] [gap]\n");
+    emit("       led <color> [n] [dur] [gap]\n");
     emit("       ping [-c N] <host>\n");
     emit("       wget <url> [-o path]\n");
     emit("       httpd [start [path]|stop|status]\n");

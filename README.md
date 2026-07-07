@@ -50,6 +50,9 @@ shell-style globbing, and user variables - all driven from the device keyboard.
   channels and reports access points, their clients, and probing stations; and
   `air w <ssid|bssid>` - live view of who joins/leaves a single AP
   (read-only; drops the Wi-Fi link while running)
+- **Indicators:** `beep [n] [dur] [gap]` sounds the speaker; `led <color> [n] [dur]
+  [gap]` blinks the RGB LED, or `led <color>` / `led off` holds it as a status
+  light. Colours: `r g b y c m w`. Blink/beep loops stop on Ctrl+C.
 - **Downloads:** `wget <url> [-o path]` - fetch a file over HTTP/HTTPS (streamed to flash or `/sd`)
 - **Access point:** host a Wi-Fi AP with `ap -s ssid [-p pass] start` (open or WPA2)
 - **telnet / nc:** interactive client with local line editing, ANSI handling
