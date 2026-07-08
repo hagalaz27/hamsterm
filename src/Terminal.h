@@ -75,6 +75,7 @@ private:
 public:
     Terminal() {
         load_vars(); // restore user variables saved from a previous session
+        sync_tz();   // apply the saved TZ (if any) so date shows local time
         M5Cardputer.Display.setRotation(1);
         M5Cardputer.Display.setTextScroll(true);
         M5Cardputer.Display.fillScreen(BLACK);
@@ -887,22 +888,24 @@ public:
     void ssh_scroll_down()        { if (sshActive && ssh) ssh->scrollDown(); }
 
     // Erase the last echoed character from the display (handles a wrap back to
-    // the previous row).
+    // the previous row). We clear the cell with a filled rectangle rather than
+    // printing a space: a space glyph paints no pixels, so it wouldn't actually
+    // rub out the character underneath.
     void read_erase_char() {
-        const int cw = 7, chh = 14;
+        const int cw = 7, lineH = 14;
         int cx = M5Cardputer.Display.getCursorX();
         int cy = M5Cardputer.Display.getCursorY();
+        int x, y;
         if (cx >= cw) {
-            M5Cardputer.Display.setCursor(cx - cw, cy);
-            M5Cardputer.Display.print(" ");
-            M5Cardputer.Display.setCursor(cx - cw, cy);
-        } else if (cy >= chh) {
+            x = cx - cw; y = cy;
+        } else if (cy >= lineH) {
             int cpr = M5Cardputer.Display.width() / cw; if (cpr < 1) cpr = 1;
-            int x = (cpr - 1) * cw;
-            M5Cardputer.Display.setCursor(x, cy - chh);
-            M5Cardputer.Display.print(" ");
-            M5Cardputer.Display.setCursor(x, cy - chh);
+            x = (cpr - 1) * cw; y = cy - lineH;
+        } else {
+            return; // nothing before the cursor
         }
+        M5Cardputer.Display.fillRect(x, y, cw, lineH, BLACK);
+        M5Cardputer.Display.setCursor(x, y);
     }
 
     // Read one line from the keyboard (for the `read` command). Echoes input,
@@ -1429,6 +1432,14 @@ public:
         f.close();
     }
 
+    // Push the current TZ variable into the C library so date/getLocalTime show
+    // local time. No TZ (or empty) means UTC. Cheap - safe to call on any change.
+    void sync_tz() {
+        auto it = vars.find("TZ");
+        Helpers::tzString = (it != vars.end() && !it->second.empty()) ? it->second : "UTC0";
+        Helpers::applyTimezone();
+    }
+
     void save_vars() {
         File f = Helpers::fsOpen("/.environment", "w");
         if (!f) return;
@@ -1439,6 +1450,7 @@ public:
             f.print("\n");
         }
         f.close();
+        sync_tz(); // a variable changed - keep the timezone in sync (covers TZ=, set, unset, read)
     }
 
     // Strip one layer of surrounding matching quotes from a value:

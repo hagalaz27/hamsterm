@@ -1,11 +1,12 @@
 #include "Helpers.h"
 #include <utility>
+#include <time.h>
+#include <stdlib.h>
 
 std::string Helpers::currentDir = "/";
 std::vector<std::string> Helpers::lastOutput;
 const char* Helpers::ntpServer = "pool.ntp.org";
-const long Helpers::gmtOffset_sec = 2 * 3600;     // UTC+2 (Ukraine)
-const int Helpers::daylightOffset_sec = 3600;
+std::string Helpers::tzString = "UTC0"; // UTC until a TZ variable overrides it
 
 bool Helpers::sdMounted = false;
 int Helpers::cmd_status = 0;
@@ -472,8 +473,17 @@ std::string Helpers::getVendorFromAPI(String mac) {
     return vendor;
 }
 
+void Helpers::applyTimezone() {
+    // NTP delivers UTC; the local offset/DST rules come entirely from the TZ
+    // string. Setting the TZ env var and calling tzset() makes localtime() (and
+    // thus getLocalTime()) honour it.
+    setenv("TZ", tzString.empty() ? "UTC0" : tzString.c_str(), 1);
+    tzset();
+}
+
 void Helpers::initTime() {
-    configTime(gmtOffset_sec, daylightOffset_sec, ntpServer);
+    configTime(0, 0, ntpServer); // sync UTC from NTP
+    applyTimezone();             // then apply the configured zone
 
     struct tm timeinfo;
     if (!getLocalTime(&timeinfo)) {

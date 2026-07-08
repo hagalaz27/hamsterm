@@ -8,6 +8,21 @@
 bool WiFiCmds::waitingForPass = false;
 std::string WiFiCmds::pendingSSID = "";
 
+// Short label for a network's security type (shown in the AUTH column).
+static const char* auth_label(wifi_auth_mode_t m) {
+    switch (m) {
+        case WIFI_AUTH_OPEN:          return "Open";
+        case WIFI_AUTH_WEP:           return "WEP";
+        case WIFI_AUTH_WPA_PSK:       return "WPA";
+        case WIFI_AUTH_WPA2_PSK:      return "WPA2";
+        case WIFI_AUTH_WPA_WPA2_PSK:  return "WPA/2";
+        case WIFI_AUTH_WPA3_PSK:      return "WPA3";
+        case WIFI_AUTH_WPA2_WPA3_PSK: return "WPA2/3";
+        case WIFI_AUTH_WAPI_PSK:      return "WAPI";
+        default:                      return "Enc";
+    }
+}
+
 void WiFiCmds::wifi_scan(LineCallback emit) {
     emit("Scanning Wi-Fi...\n");
 
@@ -35,7 +50,7 @@ void WiFiCmds::wifi_scan(LineCallback emit) {
         emit("---------------------------------\n");
 
         Helpers::lastOutput.clear();
-        for (int i = 0; i < std::min(n, 10); ++i) {
+        for (int i = 0; i < n; ++i) {
             std::string ssid = WiFi.SSID(i).c_str();
             Helpers::lastOutput.push_back(ssid);
 
@@ -56,7 +71,7 @@ void WiFiCmds::wifi_scan(LineCallback emit) {
             snprintf(line, sizeof(line), "%s | %-4d | %s\n",
                     paddedSsid.c_str(),
                     WiFi.RSSI(i),
-                    (WiFi.encryptionType(i) == WIFI_AUTH_OPEN) ? "Open" : "Pass");
+                    auth_label(WiFi.encryptionType(i)));
             emit(line);
         }
     }

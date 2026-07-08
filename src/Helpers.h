@@ -23,8 +23,8 @@ class Helpers {
     static std::string currentDir;
     static std::vector<std::string> lastOutput;
     static const char* ntpServer;
-    static const long gmtOffset_sec;
-    static const int daylightOffset_sec;
+    static std::string tzString;   // POSIX TZ string (e.g. "EET-2EEST,M3.5.0/3,M10.5.0/4"); "UTC0" = UTC
+    static void applyTimezone();   // push tzString into the C library (setenv TZ + tzset)
 
     // --- microSD mount point ---
     static bool sdMounted;
