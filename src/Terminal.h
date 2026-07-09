@@ -2239,6 +2239,39 @@ public:
                 delay(300);
                 ESP.restart();
             }
+            else if (cmd == "clear") {
+                // Wipe the screen and the scrollback, then the tail prints a
+                // fresh prompt at the top.
+                history.clear();
+                scroll_offset = 0;
+                M5Cardputer.Display.fillScreen(BLACK);
+                M5Cardputer.Display.setCursor(0, 0);
+                Helpers::cmd_status = 0;
+            }
+            else if (cmd == "sleep" || cmd.rfind("sleep ", 0) == 0) {
+                // sleep <seconds> - pause (Ctrl+C interrupts and aborts a script).
+                std::string arg = (cmd == "sleep") ? std::string() : cmd.substr(6);
+                Helpers::trim(arg);
+                long secs;
+                if (arg.empty() || !parse_uint(arg, secs) || secs < 0 || secs > 86400) {
+                    emit("Usage: sleep <seconds>\n");
+                    Helpers::cmd_status = 1;
+                    return;
+                }
+                bool interrupted = false;
+                uint32_t endAt = millis() + (uint32_t)secs * 1000;
+                while ((int32_t)(endAt - millis()) > 0) {
+                    if (loop_break_pressed()) { interrupted = true; break; }
+                    delay(20);
+                }
+                if (interrupted) {
+                    emit("^C\n");
+                    Helpers::cmd_status = 130;
+                    scriptInterrupted = true;
+                } else {
+                    Helpers::cmd_status = 0;
+                }
+            }
             else if (cmd == "sh" || cmd.rfind("sh ", 0) == 0) {
                 // sh [-v] <file> [args...] - run a script: each line executed as a
                 // command, blank lines and '#' comments skipped. Silent by default;

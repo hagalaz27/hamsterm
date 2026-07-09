@@ -48,7 +48,8 @@ void SystemCmds::help(LineCallback emit) {
     emit("       nc <host> <port>\n");
     emit("       ssh [user@]host [port]\n");
     emit("Sys:   help sysinfo free battery\n");
-    emit("       reboot | sh [-v] <file> [args]\n");
+    emit("       clear | reboot | sh [-v] <file> [args]\n");
+    emit("       sleep <seconds>\n");
     emit("Vars:  set [NAME val] | NAME=val\n");
     emit("       read [-p ask] name...\n");
     emit("       unset NAME | $NAME expands\n");
