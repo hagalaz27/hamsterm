@@ -56,7 +56,8 @@ void SystemCmds::help(LineCallback emit) {
     emit("       $1..$9 $@ $# (script args)\n");
     emit("       $? = last exit code\n");
     emit("Pipe:  cmd > f | cmd >> f\n");
-    emit("       cmd | grep <text>\n");
+    emit("       a | grep <t> | cut -f N\n");
+    emit("       a | tr [-d|-s] SET1 [SET2]\n");
     emit("       a && b | a || b\n");
     emit("Test:  [ -f x ] [ a = b ]\n");
     emit("Flow:  if C; then ...; fi\n");

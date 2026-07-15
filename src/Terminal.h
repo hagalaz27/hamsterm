@@ -29,6 +29,8 @@ private:
     int chainDepth = 0;                    // depth of &&/|| chain expansion
     bool capturing = false;                // command substitution: route output to a buffer
     std::string captureBuf;                // buffer for the current $(...) capture
+    std::string pipeInput;                 // stdin for a filter command (left side of a pipe)
+    bool hasPipeInput = false;             // whether pipeInput is meaningful for this command
     bool scriptInterrupted = false;        // Ctrl+C during a script aborts the rest of it
     static const size_t CAPTURE_CAP = 4096; // max bytes kept from a $(...) command
     using CaptureFn = std::function<std::string(const std::string&)>;
@@ -135,6 +137,44 @@ public:
     }
 
     // Split a line on top-level ';' (command separator), honoring quotes.
+    // Split a command line on top-level '|' (single pipe), honouring quotes and
+    // parentheses so '|' inside quotes or $( ) is not a pipe. '||' is left intact
+    // (it is the OR operator, already handled by the chain splitter).
+    static std::vector<std::string> split_pipes(const std::string& in) {
+        std::vector<std::string> out;
+        std::string cur; char quote = 0; int paren = 0;
+        for (size_t i = 0; i < in.size(); ++i) {
+            char c = in[i];
+            if (quote) { cur += c; if (c == quote) quote = 0; continue; }
+            if (c == '"' || c == '\'') { quote = c; cur += c; continue; }
+            if (c == '(') { paren++; cur += c; continue; }
+            if (c == ')') { if (paren > 0) paren--; cur += c; continue; }
+            if (c == '|' && paren == 0) {
+                if (i + 1 < in.size() && in[i + 1] == '|') { cur += "||"; ++i; continue; }
+                out.push_back(cur); cur.clear(); continue;
+            }
+            cur += c;
+        }
+        out.push_back(cur);
+        return out;
+    }
+
+    // Split text into lines on '\n'. A trailing newline does not produce a final
+    // empty line (so "a\nb\n" -> {"a","b"}).
+    static std::vector<std::string> split_lines(const std::string& s) {
+        std::vector<std::string> out;
+        size_t start = 0;
+        while (start < s.size()) {
+            size_t nl = s.find('\n', start);
+            if (nl == std::string::npos) { out.push_back(s.substr(start)); break; }
+            std::string ln = s.substr(start, nl - start);
+            if (!ln.empty() && ln.back() == '\r') ln.pop_back();
+            out.push_back(ln);
+            start = nl + 1;
+        }
+        return out;
+    }
+
     static std::vector<std::string> split_semicolons(const std::string& in) {
         std::vector<std::string> out;
         std::string cur; char quote = 0; int paren = 0;
@@ -951,6 +991,251 @@ public:
         return !cancelled;
     }
 
+    // grep <pattern> [file...] - print input lines containing the (literal)
+    // substring pattern. Reads the given files, or the piped input if none.
+    // The pattern is a single argument (quote it if it contains spaces).
+    void do_grep(const std::string& args, LineCallback emit) {
+        auto toks = split_ws(args);
+        if (toks.empty()) {
+            emit("Usage: grep <pattern> [file...]\n");
+            Helpers::cmd_status = 1;
+            return;
+        }
+        std::string pat = toks[0];
+        std::vector<std::string> files(toks.begin() + 1, toks.end());
+        std::string input;
+        if (!filter_read_input(files, "grep", input, emit)) {
+            Helpers::cmd_status = 1;
+            return;
+        }
+        bool matched = false;
+        for (const auto& line : split_lines(input)) {
+            if (line.find(pat) != std::string::npos) {
+                emit(line + "\n");
+                matched = true;
+            }
+        }
+        Helpers::cmd_status = matched ? 0 : 1;
+    }
+
+    // Input for a filter command: the concatenation of the named files (resolved
+    // against the current directory), or the piped input when no file is given.
+    // Returns false (and emits an error) if a file can't be read.
+    bool filter_read_input(const std::vector<std::string>& files, const char* name,
+                           std::string& out, LineCallback emit) {
+        if (files.empty()) { out = pipeInput; return true; }
+        out.clear();
+        for (const auto& f : files) {
+            std::string abs = Helpers::make_absolute(f);
+            if (!Helpers::fsExists(abs)) {
+                emit(std::string(name) + ": " + Helpers::clearFilename(f) +
+                     ": No such file or directory\n");
+                return false;
+            }
+            File fp = Helpers::fsOpen(abs, "r");
+            if (!fp || fp.isDirectory()) {
+                if (fp) fp.close();
+                emit(std::string(name) + ": " + Helpers::clearFilename(f) + ": cannot read\n");
+                return false;
+            }
+            while (fp.available()) out += (char)fp.read();
+            fp.close();
+        }
+        return true;
+    }
+
+    // Parse a cut LIST like "1,3,5-7,10-" into (lo,hi) ranges. hi == -1 means
+    // "open" (to end of line). Sets ok=false on a malformed entry.
+    static std::vector<std::pair<int,int>> parse_cut_list(const std::string& s, bool& ok) {
+        std::vector<std::pair<int,int>> out;
+        ok = true;
+        size_t start = 0;
+        while (true) {
+            size_t comma = s.find(',', start);
+            std::string part = (comma == std::string::npos) ? s.substr(start)
+                                                            : s.substr(start, comma - start);
+            if (!part.empty()) {
+                size_t dash = part.find('-');
+                int lo, hi;
+                if (dash == std::string::npos) {
+                    lo = hi = atoi(part.c_str());
+                    if (lo < 1) ok = false;
+                } else {
+                    std::string L = part.substr(0, dash), R = part.substr(dash + 1);
+                    lo = L.empty() ? 1 : atoi(L.c_str());
+                    hi = R.empty() ? -1 : atoi(R.c_str());
+                    if (lo < 1 || (hi != -1 && hi < lo)) ok = false;
+                }
+                out.push_back(std::make_pair(lo, hi));
+            }
+            if (comma == std::string::npos) break;
+            start = comma + 1;
+        }
+        return out;
+    }
+
+    static bool cut_selected(const std::vector<std::pair<int,int>>& r, int idx) {
+        for (const auto& p : r)
+            if (idx >= p.first && (p.second == -1 || idx <= p.second)) return true;
+        return false;
+    }
+
+    // cut -f LIST [-d C] [-s]  |  cut -c LIST   - filter over piped input.
+    // Fields are split on a single delimiter char (default space, not TAB, since
+    // most hamsTerm output is space-separated); combine with `tr -s` to collapse
+    // runs of spaces first. Character mode is byte-based.
+    void do_cut(const std::string& args, LineCallback emit) {
+        auto toks = split_ws(args);
+        char mode = 0;              // 'f' fields, 'c' characters
+        std::string list;
+        char delim = ' ';
+        bool suppress = false, haveList = false;
+        std::vector<std::string> files;
+        for (size_t i = 0; i < toks.size(); ++i) {
+            const std::string& t = toks[i];
+            if (t == "-f") { mode = 'f'; if (i + 1 < toks.size()) { list = toks[++i]; haveList = true; } }
+            else if (t.rfind("-f", 0) == 0 && t.size() > 2) { mode = 'f'; list = t.substr(2); haveList = true; }
+            else if (t == "-c") { mode = 'c'; if (i + 1 < toks.size()) { list = toks[++i]; haveList = true; } }
+            else if (t.rfind("-c", 0) == 0 && t.size() > 2) { mode = 'c'; list = t.substr(2); haveList = true; }
+            else if (t == "-d") { if (i + 1 < toks.size()) { std::string d = toks[++i]; delim = d.empty() ? ' ' : d[0]; } }
+            else if (t.rfind("-d", 0) == 0 && t.size() > 2) { delim = t[2]; }
+            else if (t == "-s") { suppress = true; }
+            else { files.push_back(t); } // a file operand (read instead of the pipe)
+        }
+        if (mode == 0 || !haveList) {
+            emit(usage_for("cut"));
+            Helpers::cmd_status = 1;
+            return;
+        }
+        bool okList = true;
+        auto ranges = parse_cut_list(list, okList);
+        if (!okList || ranges.empty()) {
+            emit("cut: invalid list: " + list + "\n");
+            Helpers::cmd_status = 1;
+            return;
+        }
+        std::string input;
+        if (!filter_read_input(files, "cut", input, emit)) {
+            Helpers::cmd_status = 1;
+            return;
+        }
+        for (const auto& line : split_lines(input)) {
+            if (mode == 'c') {
+                std::string out;
+                for (int p = 1; p <= (int)line.size(); ++p)
+                    if (cut_selected(ranges, p)) out += line[p - 1];
+                emit(out + "\n");
+            } else {
+                std::vector<std::string> fields;
+                size_t start = 0, pos;
+                while ((pos = line.find(delim, start)) != std::string::npos) {
+                    fields.push_back(line.substr(start, pos - start));
+                    start = pos + 1;
+                }
+                fields.push_back(line.substr(start));
+                if (fields.size() == 1) {          // no delimiter on this line
+                    if (!suppress) emit(line + "\n");
+                    continue;
+                }
+                std::string out; bool first = true;
+                for (int i = 1; i <= (int)fields.size(); ++i) {
+                    if (cut_selected(ranges, i)) {
+                        if (!first) out += delim;
+                        out += fields[i - 1];
+                        first = false;
+                    }
+                }
+                emit(out + "\n");
+            }
+        }
+        Helpers::cmd_status = 0;
+    }
+
+    // Expand a tr SET: process escapes (\n \t \r \\) and ranges (a-z, 0-9) into
+    // an explicit character string.
+    static std::string tr_expand_set(const std::string& s) {
+        std::string raw;
+        for (size_t i = 0; i < s.size(); ++i) {
+            if (s[i] == '\\' && i + 1 < s.size()) {
+                char n = s[i + 1];
+                if (n == 'n') raw += '\n';
+                else if (n == 't') raw += '\t';
+                else if (n == 'r') raw += '\r';
+                else if (n == '\\') raw += '\\';
+                else raw += n;
+                ++i;
+            } else {
+                raw += s[i];
+            }
+        }
+        std::string out;
+        for (size_t i = 0; i < raw.size(); ++i) {
+            if (i + 2 < raw.size() && raw[i + 1] == '-') {
+                unsigned char lo = (unsigned char)raw[i], hi = (unsigned char)raw[i + 2];
+                if (lo <= hi) { for (int c = lo; c <= hi; ++c) out += (char)c; i += 2; continue; }
+            }
+            out += raw[i];
+        }
+        return out;
+    }
+
+    // tr [-d] [-s] SET1 [SET2]  - translate/delete/squeeze characters of the piped
+    // input. tr SET1 SET2 maps SET1->SET2 (last SET2 char repeats if shorter);
+    // -d deletes SET1; -s squeezes runs (of SET2 when translating/deleting, else
+    // SET1). Ranges a-z / 0-9 and escapes \n \t \r \\ are supported.
+    void do_tr(const std::string& args, LineCallback emit) {
+        auto toks = split_ws(args);
+        bool del = false, squeeze = false;
+        std::vector<std::string> sets;
+        for (const auto& t : toks) {
+            if (t.size() >= 2 && t[0] == '-' &&
+                t.find_first_not_of("ds", 1) == std::string::npos) {
+                if (t.find('d') != std::string::npos) del = true;
+                if (t.find('s') != std::string::npos) squeeze = true;
+            } else {
+                sets.push_back(t);
+            }
+        }
+        // Operand count check.
+        bool ok = true;
+        if (!del && !squeeze)      ok = (sets.size() >= 2); // translate needs both
+        else                       ok = (sets.size() >= 1); // -d/-s need at least SET1
+        if (!ok) { emit(usage_for("tr")); Helpers::cmd_status = 1; return; }
+
+        std::string set1 = sets.size() >= 1 ? tr_expand_set(sets[0]) : std::string();
+        std::string set2 = sets.size() >= 2 ? tr_expand_set(sets[1]) : std::string();
+
+        bool translate = (!del && !set2.empty());
+
+        unsigned char table[256];
+        for (int i = 0; i < 256; ++i) table[i] = (unsigned char)i;
+        if (translate && !set2.empty()) {
+            for (size_t j = 0; j < set1.size(); ++j)
+                table[(unsigned char)set1[j]] = (unsigned char)set2[j < set2.size() ? j : set2.size() - 1];
+        }
+
+        bool delset[256];  for (int i = 0; i < 256; ++i) delset[i] = false;
+        if (del) for (unsigned char c : set1) delset[c] = true;
+
+        bool sqset[256];   for (int i = 0; i < 256; ++i) sqset[i] = false;
+        if (squeeze) {
+            const std::string& S = (translate || del) ? set2 : set1;
+            for (unsigned char c : S) sqset[c] = true;
+        }
+
+        std::string out;
+        unsigned char prev = 0; bool havePrev = false;
+        for (unsigned char c : pipeInput) {
+            if (del && delset[c]) continue;
+            unsigned char o = translate ? table[c] : c;
+            if (squeeze && sqset[o] && havePrev && prev == o) continue;
+            out += (char)o;
+            prev = o; havePrev = true;
+        }
+        emit(out);
+        Helpers::cmd_status = 0;
+    }
+
     // read [-p prompt] [name...]  - read a line into variables (last gets the
     // remainder). No names -> $REPLY. Ctrl+C cancels (aborts a script).
     void do_read(const std::string& argStr, LineCallback emit) {
@@ -1239,7 +1524,7 @@ public:
     // Run a command with its output captured into a string (for $(...) command
     // substitution). Re-entrant (supports nesting). Trailing newlines trimmed,
     // like a shell. Output is capped at CAPTURE_CAP bytes.
-    std::string run_capture(const std::string& innerCmd) {
+    std::string run_capture(const std::string& innerCmd, bool trimTrailing = true) {
         if (scriptDepth >= 8) return std::string(); // refuse pathologically deep $()
         bool savedCapturing = capturing;
         std::string savedBuf = captureBuf;
@@ -1260,8 +1545,10 @@ public:
 
         if (Helpers::cmd_status == 130) scriptInterrupted = true; // Ctrl+C inside $()
 
-        while (!result.empty() && (result.back() == '\n' || result.back() == '\r'))
-            result.pop_back();
+        if (trimTrailing) {
+            while (!result.empty() && (result.back() == '\n' || result.back() == '\r'))
+                result.pop_back();
+        }
         return result;
     }
 
@@ -1647,6 +1934,8 @@ public:
         if (c == "air w") return "Usage: air w <ssid|bssid>\n";
         if (c == "led")   return "Usage: led <r|g|b|y|c|m|w|off> [count] [dur] [gap]\n";
         if (c == "beep")  return "Usage: beep [count] [dur] [gap]\n";
+        if (c == "cut")   return "Usage: cut -f LIST [-d C] [-s] [file] | cut -c LIST [file]   (LIST: 1,3,5-7,10-)\n";
+        if (c == "tr")    return "Usage: tr [-d] [-s] SET1 [SET2]   (ranges a-z 0-9, escapes \\n \\t)\n";
         if (c == "wget")   return "Usage: wget <url> [-o <path>]\n";
         if (c == "wf c")   return "Usage: wf c <ssid> [-p <password>]\n";
         if (c == "net s p")return "Usage: net s p <host|ip|url> [port|a-b]...\n";
@@ -1779,40 +2068,30 @@ public:
         // pipe (no '|'). With '| grep' the redirection
         // applies to grep, and the left command just feeds the filter.
         File redirectFile; // RAII: closed/flushed when the function returns
-        std::shared_ptr<std::string> grepBuf;
-        std::shared_ptr<bool> grepMatched;
-        bool hasGrep = false;
-        std::string grepPattern;
 
-        // 1) Extract "| grep PATTERN"
-        size_t pipePos = Helpers::find_unquoted(cmd, '|');
-        if (pipePos != std::string::npos) {
-            std::string right = cmd.substr(pipePos + 1);
-            Helpers::trim(right);
-            if (right.rfind("grep", 0) == 0 &&
-                (right.size() == 4 || right[4] == ' ')) {
-                hasGrep = true;
-                grepPattern = (right.size() > 4) ? right.substr(5) : ""; // "PATTERN [> file]"
-                std::string left = cmd.substr(0, pipePos);
-                Helpers::trim(left);
-                cmd = left; // run only the left command
+        // 1) General pipeline a | b | c: run every stage but the last with its
+        // output captured and handed to the next stage as input (pipeInput). The
+        // last stage then runs normally below - reading that input if it is a
+        // filter (grep/tr/cut/...) and writing to the screen or a redirect.
+        {
+            std::vector<std::string> segs = split_pipes(cmd);
+            if (segs.size() > 1) {
+                std::string data; bool have = false;
+                for (size_t i = 0; i + 1 < segs.size(); ++i) {
+                    std::string seg = segs[i]; Helpers::trim(seg);
+                    pipeInput = data; hasPipeInput = have;
+                    data = run_capture(seg, false); // keep newlines between stages
+                    have = true;
+                }
+                pipeInput = data; hasPipeInput = have;
+                cmd = segs.back(); Helpers::trim(cmd);
             }
         }
 
-        // 2) Determine the redirection target
+        // 2) Determine the redirection target (a few commands parse '>' themselves)
         std::string redirectTarget;
         bool redirectAppend = false;
-
-        if (hasGrep) {
-            // '>' on the grep side; the pattern is whatever precedes it
-            std::string patText, file;
-            bool app;
-            parse_redirect(grepPattern, patText, file, app);
-            Helpers::trim(patText);
-            grepPattern = patText;
-            redirectTarget = file;
-            redirectAppend = app;
-        } else {
+        {
             bool selfHandles = (cmd.rfind("cat ", 0) == 0 ||
                                 cmd == "echo" ||
                                 cmd.rfind("echo ", 0) == 0 ||
@@ -1839,6 +2118,7 @@ public:
             if (!redirectFile) {
                 emit("Cannot write to " + Helpers::clearFilename(redirectTarget) + "\n");
                 Helpers::cmd_status = 1; // so `... > bad || fallback` runs the fallback
+                hasPipeInput = false;
                 print_prompt();
                 return;
             }
@@ -1847,27 +2127,8 @@ public:
             };
         }
 
-        // 4) Build the active emit: grep filter over sink, or sink directly
-        if (hasGrep) {
-            grepBuf = std::make_shared<std::string>();
-            grepMatched = std::make_shared<bool>(false);
-            std::string pat = grepPattern;
-            auto matched = grepMatched;
-            emit = [sink, grepBuf, matched, pat](const std::string& s) {
-                *grepBuf += s;
-                size_t nl;
-                while ((nl = grepBuf->find('\n')) != std::string::npos) {
-                    std::string line = grepBuf->substr(0, nl);
-                    grepBuf->erase(0, nl + 1);
-                    if (pat.empty() || line.find(pat) != std::string::npos) {
-                        *matched = true;
-                        sink(line + "\n");
-                    }
-                }
-            };
-        } else {
-            emit = sink;
-        }
+        // 4) Output goes straight to the sink (filters are ordinary commands now).
+        emit = sink;
 
         // 5) Empty left command (e.g. "> file" or "| grep x" with no command)
         if (cmd.empty()) {
@@ -2099,6 +2360,15 @@ public:
             }
             else if (cmd == "read" || cmd.rfind("read ", 0) == 0) {
                 do_read(cmd == "read" ? std::string() : cmd.substr(5), emit);
+            }
+            else if (cmd == "grep" || cmd.rfind("grep ", 0) == 0) {
+                do_grep(cmd == "grep" ? std::string() : cmd.substr(5), emit);
+            }
+            else if (cmd == "cut" || cmd.rfind("cut ", 0) == 0) {
+                do_cut(cmd == "cut" ? std::string() : cmd.substr(4), emit);
+            }
+            else if (cmd == "tr" || cmd.rfind("tr ", 0) == 0) {
+                do_tr(cmd == "tr" ? std::string() : cmd.substr(3), emit);
             }
             else if (cmd == "test" || cmd.rfind("test ", 0) == 0 ||
                      cmd == "[" || cmd.rfind("[ ", 0) == 0) {
@@ -2472,18 +2742,7 @@ public:
             Helpers::cmd_status = 1;
         }
 
-        // Flush the last grep line without a trailing '\n'
-        if (hasGrep && grepBuf && !grepBuf->empty()) {
-            if (grepPattern.empty() || grepBuf->find(grepPattern) != std::string::npos) {
-                if (grepMatched) *grepMatched = true;
-                sink(*grepBuf + "\n");
-            }
-        }
-        // In a pipeline the exit status is grep's: 0 if it matched a line, 1 if
-        // nothing matched (overrides whatever the left-hand command set).
-        if (hasGrep) {
-            Helpers::cmd_status = (grepMatched && *grepMatched) ? 0 : 1;
-        }
+        hasPipeInput = false; // consumed by this command (if any)
 
         // Print the next prompt unless a full-screen mode took over (editor,
         // telnet, ssh) or we are waiting for a password to be typed.

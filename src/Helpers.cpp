@@ -230,7 +230,16 @@ std::vector<std::pair<std::string, bool>> Helpers::tokenize_ex(const std::string
             i++;
         } else if (c == '"' || c == '\'') {
             char q = c; i++; inWord = true;
-            while (i < s.size() && s[i] != q) { cur += s[i]; i++; } // inside quotes: literal
+            while (i < s.size() && s[i] != q) {
+                // Inside double quotes, \" and \\ are escapes (bash-compatible);
+                // other backslashes and everything in single quotes stay literal.
+                if (q == '"' && s[i] == '\\' && i + 1 < s.size() &&
+                    (s[i + 1] == '"' || s[i + 1] == '\\')) {
+                    cur += s[i + 1]; i += 2;
+                } else {
+                    cur += s[i]; i++;
+                }
+            }
             if (i < s.size()) i++; // skip closing quote
         } else {
             inWord = true;
