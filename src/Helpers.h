@@ -63,6 +63,12 @@ class Helpers {
     //   are removed. tokenize_ex also reports whether each token contained a
     //   '*'/'?' OUTSIDE quotes (so quoting suppresses globbing).
     static std::vector<std::string> tokenize(const std::string& s);
+
+    // Split text into lines on '\n' (a trailing newline does not produce a final
+    // empty line; a trailing '\r' is dropped).
+    static std::vector<std::string> split_lines(const std::string& s);
+    // Strict unsigned-integer parse ("12" -> 12; "-1", "1a", "" -> false).
+    static bool parse_uint(const std::string& s, long& out);
     static std::vector<std::pair<std::string, bool>> tokenize_ex(const std::string& s);
     // First index of `ch` that lies outside any quotes, or npos.
     static size_t find_unquoted(const std::string& s, char ch, size_t from = 0);

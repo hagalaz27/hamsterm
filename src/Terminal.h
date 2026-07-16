@@ -12,6 +12,7 @@
 #include "NetworkCmds.h"
 #include "AirCmds.h"
 #include "HwCmds.h"
+#include "TextCmds.h"
 #include "WiFiCmds.h"
 #include "SystemCmds.h"
 #include "HttpdCmds.h"
@@ -159,21 +160,6 @@ public:
         return out;
     }
 
-    // Split text into lines on '\n'. A trailing newline does not produce a final
-    // empty line (so "a\nb\n" -> {"a","b"}).
-    static std::vector<std::string> split_lines(const std::string& s) {
-        std::vector<std::string> out;
-        size_t start = 0;
-        while (start < s.size()) {
-            size_t nl = s.find('\n', start);
-            if (nl == std::string::npos) { out.push_back(s.substr(start)); break; }
-            std::string ln = s.substr(start, nl - start);
-            if (!ln.empty() && ln.back() == '\r') ln.pop_back();
-            out.push_back(ln);
-            start = nl + 1;
-        }
-        return out;
-    }
 
     static std::vector<std::string> split_semicolons(const std::string& in) {
         std::vector<std::string> out;
@@ -989,251 +975,6 @@ public:
         add_to_history(promptText + input + "\n"); // record the whole line once
         out = input;
         return !cancelled;
-    }
-
-    // grep <pattern> [file...] - print input lines containing the (literal)
-    // substring pattern. Reads the given files, or the piped input if none.
-    // The pattern is a single argument (quote it if it contains spaces).
-    void do_grep(const std::string& args, LineCallback emit) {
-        auto toks = split_ws(args);
-        if (toks.empty()) {
-            emit("Usage: grep <pattern> [file...]\n");
-            Helpers::cmd_status = 1;
-            return;
-        }
-        std::string pat = toks[0];
-        std::vector<std::string> files(toks.begin() + 1, toks.end());
-        std::string input;
-        if (!filter_read_input(files, "grep", input, emit)) {
-            Helpers::cmd_status = 1;
-            return;
-        }
-        bool matched = false;
-        for (const auto& line : split_lines(input)) {
-            if (line.find(pat) != std::string::npos) {
-                emit(line + "\n");
-                matched = true;
-            }
-        }
-        Helpers::cmd_status = matched ? 0 : 1;
-    }
-
-    // Input for a filter command: the concatenation of the named files (resolved
-    // against the current directory), or the piped input when no file is given.
-    // Returns false (and emits an error) if a file can't be read.
-    bool filter_read_input(const std::vector<std::string>& files, const char* name,
-                           std::string& out, LineCallback emit) {
-        if (files.empty()) { out = pipeInput; return true; }
-        out.clear();
-        for (const auto& f : files) {
-            std::string abs = Helpers::make_absolute(f);
-            if (!Helpers::fsExists(abs)) {
-                emit(std::string(name) + ": " + Helpers::clearFilename(f) +
-                     ": No such file or directory\n");
-                return false;
-            }
-            File fp = Helpers::fsOpen(abs, "r");
-            if (!fp || fp.isDirectory()) {
-                if (fp) fp.close();
-                emit(std::string(name) + ": " + Helpers::clearFilename(f) + ": cannot read\n");
-                return false;
-            }
-            while (fp.available()) out += (char)fp.read();
-            fp.close();
-        }
-        return true;
-    }
-
-    // Parse a cut LIST like "1,3,5-7,10-" into (lo,hi) ranges. hi == -1 means
-    // "open" (to end of line). Sets ok=false on a malformed entry.
-    static std::vector<std::pair<int,int>> parse_cut_list(const std::string& s, bool& ok) {
-        std::vector<std::pair<int,int>> out;
-        ok = true;
-        size_t start = 0;
-        while (true) {
-            size_t comma = s.find(',', start);
-            std::string part = (comma == std::string::npos) ? s.substr(start)
-                                                            : s.substr(start, comma - start);
-            if (!part.empty()) {
-                size_t dash = part.find('-');
-                int lo, hi;
-                if (dash == std::string::npos) {
-                    lo = hi = atoi(part.c_str());
-                    if (lo < 1) ok = false;
-                } else {
-                    std::string L = part.substr(0, dash), R = part.substr(dash + 1);
-                    lo = L.empty() ? 1 : atoi(L.c_str());
-                    hi = R.empty() ? -1 : atoi(R.c_str());
-                    if (lo < 1 || (hi != -1 && hi < lo)) ok = false;
-                }
-                out.push_back(std::make_pair(lo, hi));
-            }
-            if (comma == std::string::npos) break;
-            start = comma + 1;
-        }
-        return out;
-    }
-
-    static bool cut_selected(const std::vector<std::pair<int,int>>& r, int idx) {
-        for (const auto& p : r)
-            if (idx >= p.first && (p.second == -1 || idx <= p.second)) return true;
-        return false;
-    }
-
-    // cut -f LIST [-d C] [-s]  |  cut -c LIST   - filter over piped input.
-    // Fields are split on a single delimiter char (default space, not TAB, since
-    // most hamsTerm output is space-separated); combine with `tr -s` to collapse
-    // runs of spaces first. Character mode is byte-based.
-    void do_cut(const std::string& args, LineCallback emit) {
-        auto toks = split_ws(args);
-        char mode = 0;              // 'f' fields, 'c' characters
-        std::string list;
-        char delim = ' ';
-        bool suppress = false, haveList = false;
-        std::vector<std::string> files;
-        for (size_t i = 0; i < toks.size(); ++i) {
-            const std::string& t = toks[i];
-            if (t == "-f") { mode = 'f'; if (i + 1 < toks.size()) { list = toks[++i]; haveList = true; } }
-            else if (t.rfind("-f", 0) == 0 && t.size() > 2) { mode = 'f'; list = t.substr(2); haveList = true; }
-            else if (t == "-c") { mode = 'c'; if (i + 1 < toks.size()) { list = toks[++i]; haveList = true; } }
-            else if (t.rfind("-c", 0) == 0 && t.size() > 2) { mode = 'c'; list = t.substr(2); haveList = true; }
-            else if (t == "-d") { if (i + 1 < toks.size()) { std::string d = toks[++i]; delim = d.empty() ? ' ' : d[0]; } }
-            else if (t.rfind("-d", 0) == 0 && t.size() > 2) { delim = t[2]; }
-            else if (t == "-s") { suppress = true; }
-            else { files.push_back(t); } // a file operand (read instead of the pipe)
-        }
-        if (mode == 0 || !haveList) {
-            emit(usage_for("cut"));
-            Helpers::cmd_status = 1;
-            return;
-        }
-        bool okList = true;
-        auto ranges = parse_cut_list(list, okList);
-        if (!okList || ranges.empty()) {
-            emit("cut: invalid list: " + list + "\n");
-            Helpers::cmd_status = 1;
-            return;
-        }
-        std::string input;
-        if (!filter_read_input(files, "cut", input, emit)) {
-            Helpers::cmd_status = 1;
-            return;
-        }
-        for (const auto& line : split_lines(input)) {
-            if (mode == 'c') {
-                std::string out;
-                for (int p = 1; p <= (int)line.size(); ++p)
-                    if (cut_selected(ranges, p)) out += line[p - 1];
-                emit(out + "\n");
-            } else {
-                std::vector<std::string> fields;
-                size_t start = 0, pos;
-                while ((pos = line.find(delim, start)) != std::string::npos) {
-                    fields.push_back(line.substr(start, pos - start));
-                    start = pos + 1;
-                }
-                fields.push_back(line.substr(start));
-                if (fields.size() == 1) {          // no delimiter on this line
-                    if (!suppress) emit(line + "\n");
-                    continue;
-                }
-                std::string out; bool first = true;
-                for (int i = 1; i <= (int)fields.size(); ++i) {
-                    if (cut_selected(ranges, i)) {
-                        if (!first) out += delim;
-                        out += fields[i - 1];
-                        first = false;
-                    }
-                }
-                emit(out + "\n");
-            }
-        }
-        Helpers::cmd_status = 0;
-    }
-
-    // Expand a tr SET: process escapes (\n \t \r \\) and ranges (a-z, 0-9) into
-    // an explicit character string.
-    static std::string tr_expand_set(const std::string& s) {
-        std::string raw;
-        for (size_t i = 0; i < s.size(); ++i) {
-            if (s[i] == '\\' && i + 1 < s.size()) {
-                char n = s[i + 1];
-                if (n == 'n') raw += '\n';
-                else if (n == 't') raw += '\t';
-                else if (n == 'r') raw += '\r';
-                else if (n == '\\') raw += '\\';
-                else raw += n;
-                ++i;
-            } else {
-                raw += s[i];
-            }
-        }
-        std::string out;
-        for (size_t i = 0; i < raw.size(); ++i) {
-            if (i + 2 < raw.size() && raw[i + 1] == '-') {
-                unsigned char lo = (unsigned char)raw[i], hi = (unsigned char)raw[i + 2];
-                if (lo <= hi) { for (int c = lo; c <= hi; ++c) out += (char)c; i += 2; continue; }
-            }
-            out += raw[i];
-        }
-        return out;
-    }
-
-    // tr [-d] [-s] SET1 [SET2]  - translate/delete/squeeze characters of the piped
-    // input. tr SET1 SET2 maps SET1->SET2 (last SET2 char repeats if shorter);
-    // -d deletes SET1; -s squeezes runs (of SET2 when translating/deleting, else
-    // SET1). Ranges a-z / 0-9 and escapes \n \t \r \\ are supported.
-    void do_tr(const std::string& args, LineCallback emit) {
-        auto toks = split_ws(args);
-        bool del = false, squeeze = false;
-        std::vector<std::string> sets;
-        for (const auto& t : toks) {
-            if (t.size() >= 2 && t[0] == '-' &&
-                t.find_first_not_of("ds", 1) == std::string::npos) {
-                if (t.find('d') != std::string::npos) del = true;
-                if (t.find('s') != std::string::npos) squeeze = true;
-            } else {
-                sets.push_back(t);
-            }
-        }
-        // Operand count check.
-        bool ok = true;
-        if (!del && !squeeze)      ok = (sets.size() >= 2); // translate needs both
-        else                       ok = (sets.size() >= 1); // -d/-s need at least SET1
-        if (!ok) { emit(usage_for("tr")); Helpers::cmd_status = 1; return; }
-
-        std::string set1 = sets.size() >= 1 ? tr_expand_set(sets[0]) : std::string();
-        std::string set2 = sets.size() >= 2 ? tr_expand_set(sets[1]) : std::string();
-
-        bool translate = (!del && !set2.empty());
-
-        unsigned char table[256];
-        for (int i = 0; i < 256; ++i) table[i] = (unsigned char)i;
-        if (translate && !set2.empty()) {
-            for (size_t j = 0; j < set1.size(); ++j)
-                table[(unsigned char)set1[j]] = (unsigned char)set2[j < set2.size() ? j : set2.size() - 1];
-        }
-
-        bool delset[256];  for (int i = 0; i < 256; ++i) delset[i] = false;
-        if (del) for (unsigned char c : set1) delset[c] = true;
-
-        bool sqset[256];   for (int i = 0; i < 256; ++i) sqset[i] = false;
-        if (squeeze) {
-            const std::string& S = (translate || del) ? set2 : set1;
-            for (unsigned char c : S) sqset[c] = true;
-        }
-
-        std::string out;
-        unsigned char prev = 0; bool havePrev = false;
-        for (unsigned char c : pipeInput) {
-            if (del && delset[c]) continue;
-            unsigned char o = translate ? table[c] : c;
-            if (squeeze && sqset[o] && havePrev && prev == o) continue;
-            out += (char)o;
-            prev = o; havePrev = true;
-        }
-        emit(out);
-        Helpers::cmd_status = 0;
     }
 
     // read [-p prompt] [name...]  - read a line into variables (last gets the
@@ -2178,48 +1919,13 @@ public:
             else if (cmd == "cd") {
                 CommonCmds::cd("/", emit); // bare cd -> home (root)
             }
-            else if (cmd.rfind("head ", 0) == 0 || cmd.rfind("tail ", 0) == 0) {
-                // head/tail [-n N | -N] <file>...   (default 10 lines)
-                bool isHead = (cmd.rfind("head ", 0) == 0);
-                auto toks = split_ws(cmd.substr(5));
-                size_t n = 10;
-                std::vector<std::string> names;
-
-                for (size_t i = 0; i < toks.size(); ++i) {
-                    const std::string& t = toks[i];
-                    if (t == "-n" && i + 1 < toks.size()) {
-                        long v;
-                        if (parse_uint(toks[++i], v) && v >= 1) {
-                            if (v > 100) v = 100; // upper bound
-                            n = (size_t)v;
-                        }
-                    } else if (t.size() > 1 && t[0] == '-') {
-                        long v;
-                        if (parse_uint(t.substr(1), v) && v >= 1) {
-                            if (v > 100) v = 100;
-                            n = (size_t)v;
-                        }
-                    } else {
-                        names.push_back(t); // keep every file, not just the last
-                    }
-                }
-
-                if (names.empty()) {
-                    emit(std::string("Usage: ") + (isHead ? "head" : "tail") + " [-n N] <file>...\n");
-                    Helpers::cmd_status = 1;
-                    return;
-                }
-
-                bool multi = names.size() > 1;
-                for (size_t i = 0; i < names.size(); ++i) {
-                    if (multi) {
-                        if (i) emit("\n");
-                        emit("==> " + names[i] + " <==\n"); // GNU-style header
-                    }
-                    std::string file = Helpers::make_absolute(names[i]);
-                    if (isHead) CommonCmds::head(file, n, emit);
-                    else        CommonCmds::tail(file, n, emit);
-                }
+            else if (cmd == "head" || cmd.rfind("head ", 0) == 0) {
+                TextCmds::head(cmd.size() > 5 ? cmd.substr(5) : std::string(),
+                               pipeInput, hasPipeInput, emit);
+            }
+            else if (cmd == "tail" || cmd.rfind("tail ", 0) == 0) {
+                TextCmds::tail(cmd.size() > 5 ? cmd.substr(5) : std::string(),
+                               pipeInput, hasPipeInput, emit);
             }
             else if (cmd.rfind("find ", 0) == 0) {
                 // find <name|pattern>          - search from the current directory
@@ -2362,13 +2068,20 @@ public:
                 do_read(cmd == "read" ? std::string() : cmd.substr(5), emit);
             }
             else if (cmd == "grep" || cmd.rfind("grep ", 0) == 0) {
-                do_grep(cmd == "grep" ? std::string() : cmd.substr(5), emit);
+                TextCmds::grep(cmd == "grep" ? std::string() : cmd.substr(5),
+                               pipeInput, hasPipeInput, emit);
             }
             else if (cmd == "cut" || cmd.rfind("cut ", 0) == 0) {
-                do_cut(cmd == "cut" ? std::string() : cmd.substr(4), emit);
+                TextCmds::cut(cmd == "cut" ? std::string() : cmd.substr(4),
+                              pipeInput, hasPipeInput, emit);
             }
             else if (cmd == "tr" || cmd.rfind("tr ", 0) == 0) {
-                do_tr(cmd == "tr" ? std::string() : cmd.substr(3), emit);
+                TextCmds::tr(cmd == "tr" ? std::string() : cmd.substr(3),
+                             pipeInput, hasPipeInput, emit);
+            }
+            else if (cmd == "wc" || cmd.rfind("wc ", 0) == 0) {
+                TextCmds::wc(cmd == "wc" ? std::string() : cmd.substr(3),
+                             pipeInput, hasPipeInput, emit);
             }
             else if (cmd == "test" || cmd.rfind("test ", 0) == 0 ||
                      cmd == "[" || cmd.rfind("[ ", 0) == 0) {
@@ -2760,16 +2473,8 @@ public:
     }
 
     // Safe unsigned-integer parse without relying on exceptions.
+    // Thin wrapper so existing call sites keep working (implementation is in Helpers).
     static bool parse_uint(const std::string& s, long& out) {
-        if (s.empty()) return false;
-        for (char c : s) {
-            if (c < '0' || c > '9') return false;
-        }
-        errno = 0;
-        char* end = nullptr;
-        long v = strtol(s.c_str(), &end, 10);
-        if (errno != 0 || end == s.c_str() || *end != '\0') return false;
-        out = v;
-        return true;
+        return Helpers::parse_uint(s, out);
     }
 };

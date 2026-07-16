@@ -2,6 +2,7 @@
 #include <utility>
 #include <time.h>
 #include <stdlib.h>
+#include <errno.h>
 
 std::string Helpers::currentDir = "/";
 std::vector<std::string> Helpers::lastOutput;
@@ -500,4 +501,31 @@ void Helpers::initTime() {
         return;
     }
     Serial.println("Time synchronized");
+}
+
+std::vector<std::string> Helpers::split_lines(const std::string& s) {
+    std::vector<std::string> out;
+    size_t start = 0;
+    while (start < s.size()) {
+        size_t nl = s.find('\n', start);
+        if (nl == std::string::npos) { out.push_back(s.substr(start)); break; }
+        std::string ln = s.substr(start, nl - start);
+        if (!ln.empty() && ln.back() == '\r') ln.pop_back();
+        out.push_back(ln);
+        start = nl + 1;
+    }
+    return out;
+}
+
+bool Helpers::parse_uint(const std::string& s, long& out) {
+    if (s.empty()) return false;
+    for (char c : s) {
+        if (c < '0' || c > '9') return false;
+    }
+    errno = 0;
+    char* end = nullptr;
+    long v = strtol(s.c_str(), &end, 10);
+    if (errno != 0 || end == s.c_str() || *end != '\0') return false;
+    out = v;
+    return true;
 }

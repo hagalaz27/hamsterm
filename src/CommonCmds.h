@@ -21,8 +21,6 @@ public:
 
     // filesystem
     static void cat(const std::vector<std::string>& files, const std::string& outputFile, bool append, LineCallback emit);
-    static void head(const std::string& file, size_t n, LineCallback emit);
-    static void tail(const std::string& file, size_t n, LineCallback emit);
     static void cd(const std::string& command, LineCallback emit);
     static void clear();
     static void cp(const std::vector<std::string>& srcs, const std::string& dst, bool recursive, LineCallback emit);
