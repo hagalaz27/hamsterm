@@ -59,6 +59,7 @@ void SystemCmds::help(LineCallback emit) {
     emit("       a | grep <t> | cut -f N\n");
     emit("       a | tr [-d|-s] SET1 [SET2]\n");
     emit("       a | wc [-l] [-w] [-c]\n");
+    emit("       a | sort [-rnuf] [-k N] | uniq [-c]\n");
     emit("       a && b | a || b\n");
     emit("Test:  [ -f x ] [ a = b ]\n");
     emit("Flow:  if C; then ...; fi\n");

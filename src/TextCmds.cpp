@@ -1,6 +1,7 @@
 #include "TextCmds.h"
 #include <cstdlib>
 #include <cstdio>
+#include <algorithm>
 
 namespace {
 
@@ -128,6 +129,75 @@ std::string wc_row(long l, long w, long b, bool sl, bool sw, bool sb,
     if (!label.empty()) out += " " + label;
     out += "\n";
     return out;
+}
+
+// ---- sort/uniq helpers ----
+
+// sort holds the whole input in RAM (there is no temp-file merge here), so the
+// line count is capped to keep the heap safe on a device without PSRAM.
+const size_t SORT_MAX_LINES = 2000;
+
+struct SortOpts {
+    bool numeric = false, fold = false, reverse = false, unique = false;
+    int  keyField = 0;   // 0 = whole line, otherwise 1-based field number
+    char sep = 0;        // 0 = split on runs of whitespace, else this single char
+};
+
+// Split a line into fields on runs of blanks (the default for sort -k).
+std::vector<std::string> split_fields_ws(const std::string& s) {
+    std::vector<std::string> f;
+    size_t i = 0;
+    while (i < s.size()) {
+        while (i < s.size() && (s[i] == ' ' || s[i] == '\t')) i++;
+        if (i >= s.size()) break;
+        size_t start = i;
+        while (i < s.size() && s[i] != ' ' && s[i] != '\t') i++;
+        f.push_back(s.substr(start, i - start));
+    }
+    return f;
+}
+
+// Split a line on a single delimiter char (sort -t C).
+std::vector<std::string> split_fields_ch(const std::string& s, char d) {
+    std::vector<std::string> f;
+    size_t start = 0, pos;
+    while ((pos = s.find(d, start)) != std::string::npos) {
+        f.push_back(s.substr(start, pos - start));
+        start = pos + 1;
+    }
+    f.push_back(s.substr(start));
+    return f;
+}
+
+// The part of the line that sorting compares.
+std::string sort_key(const std::string& line, const SortOpts& o) {
+    if (o.keyField <= 0) return line;
+    std::vector<std::string> f = o.sep ? split_fields_ch(line, o.sep)
+                                       : split_fields_ws(line);
+    if ((size_t)o.keyField <= f.size()) return f[o.keyField - 1];
+    return std::string(); // missing field sorts as empty
+}
+
+std::string fold_case(const std::string& s) {
+    std::string o;
+    for (char c : s) o += (c >= 'A' && c <= 'Z') ? (char)(c + 32) : c;
+    return o;
+}
+
+// Compare two lines by their sort key: <0, 0 or >0.
+int key_cmp(const std::string& a, const std::string& b, const SortOpts& o) {
+    std::string ka = sort_key(a, o), kb = sort_key(b, o);
+    if (o.numeric) {
+        double na = strtod(ka.c_str(), nullptr);
+        double nb = strtod(kb.c_str(), nullptr);
+        if (na < nb) return -1;
+        if (na > nb) return 1;
+        return 0;
+    }
+    if (o.fold) { ka = fold_case(ka); kb = fold_case(kb); }
+    if (ka < kb) return -1;
+    if (ka > kb) return 1;
+    return 0;
 }
 
 // ---- head/tail file readers (streaming: never load the whole file) ----
@@ -476,4 +546,114 @@ void TextCmds::head(const std::string& args, const std::string& input,
 void TextCmds::tail(const std::string& args, const std::string& input,
                     bool hasInput, LineCallback emit) {
     head_tail(false, args, input, hasInput, emit);
+}
+
+void TextCmds::sort(const std::string& args, const std::string& input,
+                    bool hasInput, LineCallback emit) {
+    (void)hasInput;
+    auto toks = Helpers::tokenize(args);
+    SortOpts o;
+    std::vector<std::string> files;
+    for (size_t i = 0; i < toks.size(); ++i) {
+        const std::string& t = toks[i];
+        if (t == "-k" && i + 1 < toks.size()) {
+            long v;
+            if (Helpers::parse_uint(toks[++i], v) && v >= 1) o.keyField = (int)v;
+        } else if (t.rfind("-k", 0) == 0 && t.size() > 2) {
+            long v;
+            if (Helpers::parse_uint(t.substr(2), v) && v >= 1) o.keyField = (int)v;
+        } else if (t == "-t" && i + 1 < toks.size()) {
+            std::string d = toks[++i];
+            if (!d.empty()) o.sep = d[0];
+        } else if (t.rfind("-t", 0) == 0 && t.size() > 2) {
+            o.sep = t[2];
+        } else if (t.size() >= 2 && t[0] == '-' &&
+                   t.find_first_not_of("rnuf", 1) == std::string::npos) {
+            if (t.find('r') != std::string::npos) o.reverse = true;
+            if (t.find('n') != std::string::npos) o.numeric = true;
+            if (t.find('u') != std::string::npos) o.unique  = true;
+            if (t.find('f') != std::string::npos) o.fold    = true;
+        } else {
+            files.push_back(t);
+        }
+    }
+
+    std::string data;
+    if (!read_input(files, "sort", input, data, emit)) { Helpers::cmd_status = 1; return; }
+
+    std::vector<std::string> lines = Helpers::split_lines(data);
+    if (lines.size() > SORT_MAX_LINES) {
+        char buf[96];
+        snprintf(buf, sizeof(buf), "sort: too many lines (%u, max %u)\n",
+                 (unsigned)lines.size(), (unsigned)SORT_MAX_LINES);
+        emit(buf);
+        Helpers::cmd_status = 1;
+        return;
+    }
+
+    // stable_sort keeps the original order of lines with equal keys.
+    std::stable_sort(lines.begin(), lines.end(),
+                     [&o](const std::string& a, const std::string& b) {
+                         int c = key_cmp(a, b, o);
+                         return o.reverse ? (c > 0) : (c < 0);
+                     });
+
+    for (size_t i = 0; i < lines.size(); ++i) {
+        // -u drops lines whose key equals the previous one (they are adjacent now).
+        if (o.unique && i > 0 && key_cmp(lines[i - 1], lines[i], o) == 0) continue;
+        emit(lines[i] + "\n");
+    }
+    Helpers::cmd_status = 0;
+}
+
+void TextCmds::uniq(const std::string& args, const std::string& input,
+                    bool hasInput, LineCallback emit) {
+    (void)hasInput;
+    auto toks = Helpers::tokenize(args);
+    bool count = false, onlyDup = false, onlyUniq = false, ignoreCase = false;
+    std::vector<std::string> files;
+    for (const auto& t : toks) {
+        if (t.size() >= 2 && t[0] == '-' &&
+            t.find_first_not_of("cdui", 1) == std::string::npos) {
+            if (t.find('c') != std::string::npos) count      = true;
+            if (t.find('d') != std::string::npos) onlyDup    = true;
+            if (t.find('u') != std::string::npos) onlyUniq   = true;
+            if (t.find('i') != std::string::npos) ignoreCase = true;
+        } else {
+            files.push_back(t);
+        }
+    }
+
+    std::string data;
+    if (!read_input(files, "uniq", input, data, emit)) { Helpers::cmd_status = 1; return; }
+
+    std::vector<std::string> lines = Helpers::split_lines(data);
+
+    // Walk the lines, collapsing runs of *adjacent* equal lines (POSIX uniq -
+    // pipe through sort first if the duplicates are scattered).
+    size_t i = 0;
+    while (i < lines.size()) {
+        size_t run = 1;
+        while (i + run < lines.size()) {
+            const std::string& a = lines[i];
+            const std::string& b = lines[i + run];
+            bool same = ignoreCase ? (fold_case(a) == fold_case(b)) : (a == b);
+            if (!same) break;
+            run++;
+        }
+        bool show = true;
+        if (onlyDup  && run < 2) show = false;   // -d: only repeated lines
+        if (onlyUniq && run > 1) show = false;   // -u: only never-repeated lines
+        if (show) {
+            if (count) {
+                char buf[16];
+                snprintf(buf, sizeof(buf), "%7u ", (unsigned)run);
+                emit(std::string(buf) + lines[i] + "\n");
+            } else {
+                emit(lines[i] + "\n");
+            }
+        }
+        i += run;
+    }
+    Helpers::cmd_status = 0;
 }

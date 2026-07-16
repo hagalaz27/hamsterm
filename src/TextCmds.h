@@ -36,4 +36,13 @@ public:
                      bool hasInput, LineCallback emit);
     static void tail(const std::string& args, const std::string& input,
                      bool hasInput, LineCallback emit);
+
+    // sort [-r] [-n] [-u] [-f] [-k N] [-t C] [file...]
+    // Holds every line in RAM, so the input is capped (SORT_MAX_LINES).
+    static void sort(const std::string& args, const std::string& input,
+                     bool hasInput, LineCallback emit);
+
+    // uniq [-c] [-d] [-u] [-i] [file...]  - collapse *adjacent* duplicates
+    static void uniq(const std::string& args, const std::string& input,
+                     bool hasInput, LineCallback emit);
 };

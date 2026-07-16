@@ -32,6 +32,10 @@ private:
     std::string captureBuf;                // buffer for the current $(...) capture
     std::string pipeInput;                 // stdin for a filter command (left side of a pipe)
     bool hasPipeInput = false;             // whether pipeInput is meaningful for this command
+    // False when the last output stopped mid-line (no trailing '\n'), e.g. after
+    // `tr -d '\n'`. The scrollback stores such text as a finished line, so the
+    // prompt has to start on the next row or screen and history drift apart.
+    bool atLineStart = true;
     bool scriptInterrupted = false;        // Ctrl+C during a script aborts the rest of it
     static const size_t CAPTURE_CAP = 4096; // max bytes kept from a $(...) command
     using CaptureFn = std::function<std::string(const std::string&)>;
@@ -539,6 +543,7 @@ public:
     void refresh_screen() {
         M5Cardputer.Display.fillScreen(BLACK);
         M5Cardputer.Display.setCursor(0, 0);
+        atLineStart = true; // a redraw renders every history entry as a full line
 
         int total_lines = history.size();
         int start_index = std::max(0, total_lines - lines_on_screen - scroll_offset);
@@ -715,6 +720,15 @@ public:
     // script finishes (by which point scriptDepth is back to 0).
     void print_prompt() {
         if (scriptDepth > 0 || chainDepth > 0) return;
+        // If the last command's output stopped mid-line, close that line first.
+        // add_to_history() already stored it as a complete line, and
+        // refresh_screen() draws every history entry with println(), so without
+        // this the live screen (prompt glued after the text) would not match a
+        // redraw - the text appeared to vanish on the next keypress.
+        if (!atLineStart) {
+            if (scroll_offset == 0) M5Cardputer.Display.println();
+            atLineStart = true;
+        }
         M5Cardputer.Display.print(prompt.c_str());
         inputStartY = M5Cardputer.Display.getCursorY();
         draw_caret();
@@ -977,6 +991,16 @@ public:
         return !cancelled;
     }
 
+
+
+
+
+
+
+
+
+
+
     // read [-p prompt] [name...]  - read a line into variables (last gets the
     // remainder). No names -> $REPLY. Ctrl+C cancels (aborts a script).
     void do_read(const std::string& argStr, LineCallback emit) {
@@ -1131,6 +1155,7 @@ public:
         // When the user has scrolled up (offset > 0), keep buffering into history
         // but don't paint over their scrolled view; scrolling back down redraws.
         if (scroll_offset == 0) M5Cardputer.Display.print(text.c_str());
+        if (!text.empty()) atLineStart = (text.back() == '\n');
     }
 
     // Generic parsing of output redirection (> and >>).
@@ -2083,6 +2108,14 @@ public:
                 TextCmds::wc(cmd == "wc" ? std::string() : cmd.substr(3),
                              pipeInput, hasPipeInput, emit);
             }
+            else if (cmd == "sort" || cmd.rfind("sort ", 0) == 0) {
+                TextCmds::sort(cmd == "sort" ? std::string() : cmd.substr(5),
+                               pipeInput, hasPipeInput, emit);
+            }
+            else if (cmd == "uniq" || cmd.rfind("uniq ", 0) == 0) {
+                TextCmds::uniq(cmd == "uniq" ? std::string() : cmd.substr(5),
+                               pipeInput, hasPipeInput, emit);
+            }
             else if (cmd == "test" || cmd.rfind("test ", 0) == 0 ||
                      cmd == "[" || cmd.rfind("[ ", 0) == 0) {
                 // test EXPR  /  [ EXPR ]  - evaluate a condition, set $? only.
@@ -2229,6 +2262,7 @@ public:
                 scroll_offset = 0;
                 M5Cardputer.Display.fillScreen(BLACK);
                 M5Cardputer.Display.setCursor(0, 0);
+                atLineStart = true;
                 Helpers::cmd_status = 0;
             }
             else if (cmd == "sleep" || cmd.rfind("sleep ", 0) == 0) {
