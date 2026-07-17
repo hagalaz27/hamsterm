@@ -64,6 +64,16 @@ class Helpers {
     //   '*'/'?' OUTSIDE quotes (so quoting suppresses globbing).
     static std::vector<std::string> tokenize(const std::string& s);
 
+    // True when s[i] starts a backslash escape inside a double-quoted section
+    // (\" or \\). Single quotes are literal, so `quote` must be '"'. Every parser
+    // that walks a command line character by character (pipes, ;, &&/||, $( ),
+    // redirects, tokenizer) must apply this same rule, or an escaped quote looks
+    // like the end of the quoted text and the rest of the line is misread.
+    static bool escaped_pair(const std::string& s, size_t i, char quote) {
+        return quote == '"' && i + 1 < s.size() && s[i] == '\\' &&
+               (s[i + 1] == '"' || s[i + 1] == '\\');
+    }
+
     // Split text into lines on '\n' (a trailing newline does not produce a final
     // empty line; a trailing '\r' is dropped).
     static std::vector<std::string> split_lines(const std::string& s);

@@ -32,10 +32,6 @@ private:
     std::string captureBuf;                // buffer for the current $(...) capture
     std::string pipeInput;                 // stdin for a filter command (left side of a pipe)
     bool hasPipeInput = false;             // whether pipeInput is meaningful for this command
-    // False when the last output stopped mid-line (no trailing '\n'), e.g. after
-    // `tr -d '\n'`. The scrollback stores such text as a finished line, so the
-    // prompt has to start on the next row or screen and history drift apart.
-    bool atLineStart = true;
     bool scriptInterrupted = false;        // Ctrl+C during a script aborts the rest of it
     static const size_t CAPTURE_CAP = 4096; // max bytes kept from a $(...) command
     using CaptureFn = std::function<std::string(const std::string&)>;
@@ -150,7 +146,14 @@ public:
         std::string cur; char quote = 0; int paren = 0;
         for (size_t i = 0; i < in.size(); ++i) {
             char c = in[i];
-            if (quote) { cur += c; if (c == quote) quote = 0; continue; }
+            if (quote) {
+                // An escaped quote must not end the quoted text, or `tr -d "\""`
+                // would leave the rest of the line (including any |) quoted.
+                if (Helpers::escaped_pair(in, i, quote)) {
+                    cur += c; cur += in[i + 1]; ++i; continue;
+                }
+                cur += c; if (c == quote) quote = 0; continue;
+            }
             if (c == '"' || c == '\'') { quote = c; cur += c; continue; }
             if (c == '(') { paren++; cur += c; continue; }
             if (c == ')') { if (paren > 0) paren--; cur += c; continue; }
@@ -170,7 +173,12 @@ public:
         std::string cur; char quote = 0; int paren = 0;
         for (size_t i = 0; i < in.size(); ++i) {
             char c = in[i];
-            if (quote) { cur += c; if (c == quote) quote = 0; continue; }
+            if (quote) {
+                if (Helpers::escaped_pair(in, i, quote)) {
+                    cur += c; cur += in[i + 1]; ++i; continue; // escaped, keep verbatim
+                }
+                cur += c; if (c == quote) quote = 0; continue;
+            }
             if (c == '"' || c == '\'') { quote = c; cur += c; continue; }
             if (c == '(') { paren++; cur += c; continue; }
             if (c == ')') { if (paren > 0) paren--; cur += c; continue; }
@@ -543,7 +551,6 @@ public:
     void refresh_screen() {
         M5Cardputer.Display.fillScreen(BLACK);
         M5Cardputer.Display.setCursor(0, 0);
-        atLineStart = true; // a redraw renders every history entry as a full line
 
         int total_lines = history.size();
         int start_index = std::max(0, total_lines - lines_on_screen - scroll_offset);
@@ -720,14 +727,17 @@ public:
     // script finishes (by which point scriptDepth is back to 0).
     void print_prompt() {
         if (scriptDepth > 0 || chainDepth > 0) return;
-        // If the last command's output stopped mid-line, close that line first.
-        // add_to_history() already stored it as a complete line, and
-        // refresh_screen() draws every history entry with println(), so without
-        // this the live screen (prompt glued after the text) would not match a
-        // redraw - the text appeared to vanish on the next keypress.
-        if (!atLineStart) {
-            if (scroll_offset == 0) M5Cardputer.Display.println();
-            atLineStart = true;
+        // If the previous output stopped mid-row, close that row first: the
+        // scrollback stores it as a complete line and refresh_screen() draws
+        // every entry with println(), so the prompt must start on a fresh row.
+        //
+        // Ask the display where the cursor really is instead of tracking it in a
+        // flag: plenty of code draws straight to the display (the Enter echo,
+        // read_line, the editor, telnet), so a shadow flag drifts out of sync
+        // and then adds a newline when the row is already empty - which showed
+        // up as a random blank line after silent commands like mkdir/touch.
+        if (scroll_offset == 0 && M5Cardputer.Display.getCursorX() != 0) {
+            M5Cardputer.Display.println();
         }
         M5Cardputer.Display.print(prompt.c_str());
         inputStartY = M5Cardputer.Display.getCursorY();
@@ -1155,7 +1165,6 @@ public:
         // When the user has scrolled up (offset > 0), keep buffering into history
         // but don't paint over their scrolled view; scrolling back down redraws.
         if (scroll_offset == 0) M5Cardputer.Display.print(text.c_str());
-        if (!text.empty()) atLineStart = (text.back() == '\n');
     }
 
     // Generic parsing of output redirection (> and >>).
@@ -1363,6 +1372,7 @@ public:
                     size_t k = i + 2; int depth = 0; char q = 0; bool closed = false;
                     while (k < in.size()) {
                         char d = in[k];
+                        if (q && Helpers::escaped_pair(in, k, q)) { k += 2; continue; }
                         if (q) { if (d == q) q = 0; }
                         else if (d == '"' || d == '\'') q = d;
                         else if (d == '(') depth++;
@@ -1656,6 +1666,9 @@ public:
         while (i < in.size()) {
             char c = in[i];
             if (quote) {
+                if (Helpers::escaped_pair(in, i, quote)) { // \" or \\ : keep both
+                    cur += c; cur += in[i + 1]; i += 2; continue;
+                }
                 cur += c;
                 if (c == quote) quote = 0;
                 i++; continue;
@@ -1679,10 +1692,12 @@ public:
     // Usage hint for a command name typed with no arguments. Returns "" if the
     // bare word isn't a known command that requires arguments. Used so that e.g.
     // typing just "cat" shows its usage (and fails) instead of "Unknown command".
+    // Usage text for commands that need an argument: printed by the final else
+    // of the dispatch when one of them is typed bare. Commands whose dispatch
+    // accepts the bare form (wc/sort/uniq read the pipe; grep/cut/tr/head/tail
+    // live in TextCmds) print their own usage and are deliberately not listed.
     static std::string usage_for(const std::string& c) {
         if (c == "cat")    return "Usage: cat <file>...\n";
-        if (c == "head")   return "Usage: head [-n N] <file>...\n";
-        if (c == "tail")   return "Usage: tail [-n N] <file>...\n";
         if (c == "find")   return "Usage: find [path] <name|pattern>\n";
         if (c == "ssh")    return "Usage: ssh [user@]host [port]\n";
         if (c == "telnet") return "Usage: telnet <host> [port]\n";
@@ -1699,9 +1714,6 @@ public:
         if (c == "air" || c == "air s") return "Usage: air s [seconds]\n";
         if (c == "air w") return "Usage: air w <ssid|bssid>\n";
         if (c == "led")   return "Usage: led <r|g|b|y|c|m|w|off> [count] [dur] [gap]\n";
-        if (c == "beep")  return "Usage: beep [count] [dur] [gap]\n";
-        if (c == "cut")   return "Usage: cut -f LIST [-d C] [-s] [file] | cut -c LIST [file]   (LIST: 1,3,5-7,10-)\n";
-        if (c == "tr")    return "Usage: tr [-d] [-s] SET1 [SET2]   (ranges a-z 0-9, escapes \\n \\t)\n";
         if (c == "wget")   return "Usage: wget <url> [-o <path>]\n";
         if (c == "wf c")   return "Usage: wf c <ssid> [-p <password>]\n";
         if (c == "net s p")return "Usage: net s p <host|ip|url> [port|a-b]...\n";
@@ -1884,6 +1896,7 @@ public:
             if (!redirectFile) {
                 emit("Cannot write to " + Helpers::clearFilename(redirectTarget) + "\n");
                 Helpers::cmd_status = 1; // so `... > bad || fallback` runs the fallback
+                pipeInput.clear();
                 hasPipeInput = false;
                 print_prompt();
                 return;
@@ -2244,7 +2257,7 @@ public:
                 NetworkCmds::wget(cmd.substr(5), emit);
             }
             else if (cmd == "wget") {
-                emit("Usage: wget <url> [-o <path>]\n");
+                emit(usage_for("wget"));
                 Helpers::cmd_status = 1;
             }
             else if (cmd == "httpd" || cmd.rfind("httpd ", 0) == 0) {
@@ -2262,7 +2275,6 @@ public:
                 scroll_offset = 0;
                 M5Cardputer.Display.fillScreen(BLACK);
                 M5Cardputer.Display.setCursor(0, 0);
-                atLineStart = true;
                 Helpers::cmd_status = 0;
             }
             else if (cmd == "sleep" || cmd.rfind("sleep ", 0) == 0) {
@@ -2489,7 +2501,10 @@ public:
             Helpers::cmd_status = 1;
         }
 
-        hasPipeInput = false; // consumed by this command (if any)
+        // Consumed by this command: clear BOTH the flag and the buffer, or the
+        // next bare filter would silently reuse the previous pipeline's data.
+        pipeInput.clear();
+        hasPipeInput = false;
 
         // Print the next prompt unless a full-screen mode took over (editor,
         // telnet, ssh) or we are waiting for a password to be typed.

@@ -234,9 +234,8 @@ std::vector<std::pair<std::string, bool>> Helpers::tokenize_ex(const std::string
             while (i < s.size() && s[i] != q) {
                 // Inside double quotes, \" and \\ are escapes (bash-compatible);
                 // other backslashes and everything in single quotes stay literal.
-                if (q == '"' && s[i] == '\\' && i + 1 < s.size() &&
-                    (s[i + 1] == '"' || s[i + 1] == '\\')) {
-                    cur += s[i + 1]; i += 2;
+                if (escaped_pair(s, i, q)) {
+                    cur += s[i + 1]; i += 2; // consume the escape, keep the char
                 } else {
                     cur += s[i]; i++;
                 }
@@ -262,6 +261,7 @@ size_t Helpers::find_unquoted(const std::string& s, char ch, size_t from) {
     bool inS = false, inD = false;
     for (size_t i = from; i < s.size(); i++) {
         char c = s[i];
+        if (inD && escaped_pair(s, i, '"')) { i++; continue; } // \" / \\ stay quoted
         if (c == '\'' && !inD) inS = !inS;
         else if (c == '"' && !inS) inD = !inD;
         else if (c == ch && !inS && !inD) return i;

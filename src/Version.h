@@ -1,4 +1,4 @@
 #pragma once
 
 // Single source of truth for the firmware version (used by splash and sysinfo).
-#define HAMSTERM_VERSION "1.0.134"
+#define HAMSTERM_VERSION "1.0.139"

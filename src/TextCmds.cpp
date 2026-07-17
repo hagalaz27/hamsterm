@@ -9,8 +9,11 @@ namespace {
 // against the current directory), or the piped input when no file is given.
 // Returns false (and emits an error) if a file can't be read.
 bool read_input(const std::vector<std::string>& files, const char* name,
-                const std::string& piped, std::string& out, LineCallback emit) {
-    if (files.empty()) { out = piped; return true; }
+                const std::string& piped, bool hasPiped, std::string& out,
+                LineCallback emit) {
+    // No file operand: use the pipe - but only if one actually fed us. Without
+    // the hasPiped guard a stale buffer from an earlier pipeline would be read.
+    if (files.empty()) { out = hasPiped ? piped : std::string(); return true; }
     out.clear();
     for (const auto& f : files) {
         std::string abs = Helpers::make_absolute(f);
@@ -311,7 +314,7 @@ void head_tail(bool isHead, const std::string& args, const std::string& input,
     if (names.empty()) {
         // No file operand: act as a pipe filter over the piped input.
         if (!hasInput) {
-            emit(std::string("Usage: ") + (isHead ? "head" : "tail") + " [-n N] <file>...\n");
+            emit(std::string("Usage: ") + (isHead ? "head" : "tail") + " [-n N] [file...]   (no file: reads a pipe)\n");
             Helpers::cmd_status = 1;
             return;
         }
@@ -343,7 +346,6 @@ void head_tail(bool isHead, const std::string& args, const std::string& input,
 
 void TextCmds::grep(const std::string& args, const std::string& input,
                     bool hasInput, LineCallback emit) {
-    (void)hasInput;
     auto toks = Helpers::tokenize(args);
     if (toks.empty()) {
         emit("Usage: grep <pattern> [file...]\n");
@@ -352,8 +354,13 @@ void TextCmds::grep(const std::string& args, const std::string& input,
     }
     std::string pat = toks[0];
     std::vector<std::string> files(toks.begin() + 1, toks.end());
+    if (files.empty() && !hasInput) {
+        emit("Usage: grep <pattern> [file...]   (no file: reads a pipe)\n");
+        Helpers::cmd_status = 1;
+        return;
+    }
     std::string data;
-    if (!read_input(files, "grep", input, data, emit)) {
+    if (!read_input(files, "grep", input, hasInput, data, emit)) {
         Helpers::cmd_status = 1;
         return;
     }
@@ -369,7 +376,6 @@ void TextCmds::grep(const std::string& args, const std::string& input,
 
 void TextCmds::cut(const std::string& args, const std::string& input,
                    bool hasInput, LineCallback emit) {
-    (void)hasInput;
     auto toks = Helpers::tokenize(args);
     char mode = 0;              // 'f' fields, 'c' characters
     std::string list;
@@ -387,7 +393,7 @@ void TextCmds::cut(const std::string& args, const std::string& input,
         else if (t == "-s") { suppress = true; }
         else { files.push_back(t); } // a file operand (read instead of the pipe)
     }
-    if (mode == 0 || !haveList) {
+    if (mode == 0 || !haveList || (files.empty() && !hasInput)) {
         emit("Usage: cut -f LIST [-d C] [-s] [file] | cut -c LIST [file]   (LIST: 1,3,5-7,10-)\n");
         Helpers::cmd_status = 1;
         return;
@@ -400,7 +406,7 @@ void TextCmds::cut(const std::string& args, const std::string& input,
         return;
     }
     std::string data;
-    if (!read_input(files, "cut", input, data, emit)) {
+    if (!read_input(files, "cut", input, hasInput, data, emit)) {
         Helpers::cmd_status = 1;
         return;
     }
@@ -438,7 +444,6 @@ void TextCmds::cut(const std::string& args, const std::string& input,
 
 void TextCmds::tr(const std::string& args, const std::string& input,
                   bool hasInput, LineCallback emit) {
-    (void)hasInput;
     auto toks = Helpers::tokenize(args);
     bool del = false, squeeze = false;
     std::vector<std::string> sets;
@@ -455,7 +460,7 @@ void TextCmds::tr(const std::string& args, const std::string& input,
     bool ok = true;
     if (!del && !squeeze)      ok = (sets.size() >= 2); // translate needs both
     else                       ok = (sets.size() >= 1); // -d/-s need at least SET1
-    if (!ok) {
+    if (!ok || !hasInput) { // tr has no file operand: it only ever reads a pipe
         emit("Usage: tr [-d] [-s] SET1 [SET2]   (ranges a-z 0-9, escapes \\n \\t)\n");
         Helpers::cmd_status = 1;
         return;
@@ -497,7 +502,6 @@ void TextCmds::tr(const std::string& args, const std::string& input,
 
 void TextCmds::wc(const std::string& args, const std::string& input,
                   bool hasInput, LineCallback emit) {
-    (void)hasInput;
     auto toks = Helpers::tokenize(args);
     bool sl = false, sw = false, sb = false;
     std::vector<std::string> files;
@@ -513,9 +517,15 @@ void TextCmds::wc(const std::string& args, const std::string& input,
     }
     if (!sl && !sw && !sb) { sl = sw = sb = true; } // default: all three
 
+    if (files.empty() && !hasInput) {
+        emit("Usage: wc [-l] [-w] [-c] [file...]   (no file: reads a pipe)\n");
+        Helpers::cmd_status = 1;
+        return;
+    }
+
     if (files.empty()) {
         std::string data;
-        if (!read_input(files, "wc", input, data, emit)) { Helpers::cmd_status = 1; return; }
+        if (!read_input(files, "wc", input, hasInput, data, emit)) { Helpers::cmd_status = 1; return; }
         long l, w, b;
         wc_count(data, l, w, b);
         emit(wc_row(l, w, b, sl, sw, sb, ""));
@@ -528,7 +538,7 @@ void TextCmds::wc(const std::string& args, const std::string& input,
     for (const auto& f : files) {
         std::vector<std::string> one(1, f);
         std::string data;
-        if (!read_input(one, "wc", input, data, emit)) { anyFail = true; continue; }
+        if (!read_input(one, "wc", input, hasInput, data, emit)) { anyFail = true; continue; }
         long l, w, b;
         wc_count(data, l, w, b);
         tl += l; tw += w; tb += b;
@@ -550,7 +560,6 @@ void TextCmds::tail(const std::string& args, const std::string& input,
 
 void TextCmds::sort(const std::string& args, const std::string& input,
                     bool hasInput, LineCallback emit) {
-    (void)hasInput;
     auto toks = Helpers::tokenize(args);
     SortOpts o;
     std::vector<std::string> files;
@@ -578,8 +587,13 @@ void TextCmds::sort(const std::string& args, const std::string& input,
         }
     }
 
+    if (files.empty() && !hasInput) {
+        emit("Usage: sort [-r] [-n] [-u] [-f] [-k N] [-t C] [file...]   (no file: reads a pipe)\n");
+        Helpers::cmd_status = 1;
+        return;
+    }
     std::string data;
-    if (!read_input(files, "sort", input, data, emit)) { Helpers::cmd_status = 1; return; }
+    if (!read_input(files, "sort", input, hasInput, data, emit)) { Helpers::cmd_status = 1; return; }
 
     std::vector<std::string> lines = Helpers::split_lines(data);
     if (lines.size() > SORT_MAX_LINES) {
@@ -608,7 +622,6 @@ void TextCmds::sort(const std::string& args, const std::string& input,
 
 void TextCmds::uniq(const std::string& args, const std::string& input,
                     bool hasInput, LineCallback emit) {
-    (void)hasInput;
     auto toks = Helpers::tokenize(args);
     bool count = false, onlyDup = false, onlyUniq = false, ignoreCase = false;
     std::vector<std::string> files;
@@ -624,8 +637,13 @@ void TextCmds::uniq(const std::string& args, const std::string& input,
         }
     }
 
+    if (files.empty() && !hasInput) {
+        emit("Usage: uniq [-c] [-d] [-u] [-i] [file...]   (no file: reads a pipe)\n");
+        Helpers::cmd_status = 1;
+        return;
+    }
     std::string data;
-    if (!read_input(files, "uniq", input, data, emit)) { Helpers::cmd_status = 1; return; }
+    if (!read_input(files, "uniq", input, hasInput, data, emit)) { Helpers::cmd_status = 1; return; }
 
     std::vector<std::string> lines = Helpers::split_lines(data);
 
