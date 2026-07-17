@@ -47,6 +47,11 @@ public:
     // left literal. Oversized ranges are left literal to protect memory.
     static std::string expand_braces(const std::string& cmdline);
 
+    // Last component of a path ("/sd/a/b.txt" -> "b.txt"). Public because
+    // tab-completion needs it: File::name() returns a full path on some
+    // esp32-arduino versions and just the basename on others.
+    static std::string base_name(const std::string& path);
+
 private:
     static std::vector<std::string> expand_token(const std::string& tok);
     // Multi-component glob: expand a (possibly absolute) pattern whose '*'/'?'
@@ -55,7 +60,6 @@ private:
     static std::vector<std::string> expand_path(const std::string& absPattern);
     // Internal helpers for recursive operations
     static std::string path_join(const std::string& a, const std::string& b);
-    static std::string base_name(const std::string& path);
     static bool copy_file(const std::string& src, const std::string& dst, LineCallback emit);
     static bool copy_recursive(const std::string& src, const std::string& dst, LineCallback emit);
     static bool remove_recursive(const std::string& path, LineCallback emit);

@@ -597,36 +597,126 @@ public:
         return (sp == std::string::npos) ? 0 : sp + 1;
     }
 
-    void handle_tab() {
-        // FIX: tab-completion fully rewritten.
-        //  - respects the already-typed prefix of the last token;
-        //  - inserts only matching candidates;
-        //  - cycles through matches correctly.
-        if (Helpers::lastOutput.empty()) return;
+    // Every command the dispatch knows, for first-token completion. Multiword
+    // commands (air s, net s p, wf c ...) are offered by their first word only -
+    // the rest is typed by hand.
+    // Commands whose arguments are file paths. Everything else (led, air, beep,
+    // ping, wf, sleep, tr, ...) takes values that don't live on the filesystem,
+    // so Tab stays quiet there rather than offering misleading file names.
+    static bool takes_paths(const std::string& firstWord) {
+        static const std::vector<std::string> p = {
+            "[", "cat", "cd", "cp", "cut", "ed", "edit", "find", "grep", "head",
+            "ls", "mkdir", "mv", "rm", "rmdir", "sh", "sort", "tail", "test",
+            "touch", "uniq", "wc"
+        };
+        for (const auto& c : p) if (c == firstWord) return true;
+        return false;
+    }
 
+    static const std::vector<std::string>& command_names() {
+        static const std::vector<std::string> names = {
+            "air", "ap", "bat", "battery", "beep", "cat", "cd", "clear", "cp",
+            "cut", "date", "df", "echo", "ed", "edit", "find", "free", "grep",
+            "head", "help", "httpd", "led", "ls", "mkdir", "mount", "mv", "nc",
+            "net", "ping", "pwd", "read", "reboot", "rm", "rmdir", "set", "sh",
+            "sleep", "sort", "ssh", "sysinfo", "tail", "telnet", "test", "touch",
+            "tr", "umount", "uniq", "unmount", "unset", "wc", "wf", "wget"
+        };
+        return names;
+    }
+
+    static bool has_prefix(const std::string& s, const std::string& p) {
+        return s.size() >= p.size() && s.compare(0, p.size(), p) == 0;
+    }
+
+    // Candidates for the last token when it is a path: read the directory the
+    // token points at, right now. This is what makes completion work without
+    // running `ls` first, and in the directory the token actually names.
+    // `prefixOut` is the part after the last '/' - the bit already typed.
+    void collect_path_matches(const std::string& token, std::string& prefixOut,
+                              std::vector<std::string>& out) {
+        size_t slash = token.find_last_of('/');
+        std::string dirPart, basePart;
+        if (slash == std::string::npos) { dirPart = "";                 basePart = token; }
+        else                            { dirPart = token.substr(0, slash + 1);
+                                          basePart = token.substr(slash + 1); }
+        prefixOut = basePart;
+
+        std::string dirAbs = Helpers::make_absolute(dirPart); // "" -> current dir
+        bool wantHidden = !basePart.empty() && basePart[0] == '.';
+
+        // The virtual SD mount point only exists at the internal root.
+        if (dirAbs == "/" && Helpers::sdMounted && has_prefix("sd", basePart)) {
+            out.push_back("sd/");
+        }
+
+        File d = Helpers::fsOpen(dirAbs, "r");
+        if (!d) return;
+        if (!d.isDirectory()) { d.close(); return; }
+
+        const size_t MAX_MATCHES = 64;
+        size_t scanned = 0;
+        File f = d.openNextFile();
+        while (f && out.size() < MAX_MATCHES) {
+            std::string base = CommonCmds::base_name(f.name());
+            bool isDir = f.isDirectory();
+            f.close();
+            bool hidden = !base.empty() && base[0] == '.';
+            if (!base.empty() && (wantHidden || !hidden) && has_prefix(base, basePart)) {
+                out.push_back(isDir ? base + "/" : base);
+            }
+            if ((++scanned & 0x3F) == 0) delay(1); // feed the watchdog on big dirs
+            f = d.openNextFile();
+        }
+        d.close();
+    }
+
+    void handle_tab() {
         if (scroll_offset > 0) {
             scroll_offset = 0;
             refresh_screen();
         }
 
-        // New completion cycle: rebuild the list of matches
+        // New completion cycle: work out what is being completed and build the
+        // list of candidates.
         if (commandNumber == -1) {
             size_t start = last_token_start();
-            tabPrefix = command.substr(start);
+            std::string token = command.substr(start);
+            std::string before = command.substr(0, start);
+            Helpers::trim(before);
+
             tabMatches.clear();
 
-            for (const auto& cand : Helpers::lastOutput) {
-                // In different esp32-arduino versions File::name() returns either
-                // the basename or a full slashed path - normalize it.
-                std::string base = cand;
-                size_t slash = base.find_last_of('/');
-                if (slash != std::string::npos) base = base.substr(slash + 1);
-
-                if (base.size() >= tabPrefix.size() &&
-                    base.compare(0, tabPrefix.size(), tabPrefix) == 0) {
-                    tabMatches.push_back(base);
-                }
+            if (before.empty()) {
+                // First token -> a command name. No trailing space is added: the
+                // space you type ends the Tab cycle yourself, and the next Tab
+                // then completes the argument (adding one here would keep the
+                // cycle running and insert a second space).
+                tabPrefix = token;
+                for (const auto& c : command_names())
+                    if (has_prefix(c, token)) tabMatches.push_back(c);
+            } else if (before == "wf c") {
+                // Networks are not on the filesystem: complete them from the
+                // last `wf s` listing.
+                tabPrefix = token;
+                for (const auto& cand : Helpers::lastOutput)
+                    if (has_prefix(cand, token)) tabMatches.push_back(cand);
+            } else {
+                // Completing an argument: only offer files where a file is
+                // actually expected - for the commands that take paths, for a
+                // redirect target (any command), and for the two flag-style
+                // paths in the help: `wget -o <path>` and `httpd start <path>`.
+                std::vector<std::string> beforeToks = Helpers::tokenize(before);
+                std::string first = beforeToks.empty() ? std::string() : beforeToks.front();
+                std::string prev  = beforeToks.empty() ? std::string() : beforeToks.back();
+                bool wantPath = takes_paths(first) ||
+                                prev == ">" || prev == ">>" ||
+                                prev == "-o" ||
+                                (first == "httpd" && prev == "start");
+                if (!wantPath) return; // nothing sensible to complete here
+                collect_path_matches(token, tabPrefix, tabMatches);
             }
+
             if (tabMatches.empty()) return; // nothing to insert
             commandNumber = 0;
         } else {

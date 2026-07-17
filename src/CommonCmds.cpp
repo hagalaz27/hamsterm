@@ -370,15 +370,9 @@ void CommonCmds::ls(const std::string& currentDir, bool showAll, size_t maxShown
         return;
     }
 
-    Helpers::lastOutput.clear();
-    // Cap the tab-completion data; otherwise a directory with
-    // thousands of files would eat all the memory.
-    const size_t LASTOUTPUT_CAP = 128;
-
     // The virtual SD mount point is visible at the internal FS root.
     if (currentDir == "/" && Helpers::sdMounted) {
         emit("[DIR] sd\n");
-        Helpers::lastOutput.push_back("sd");
     }
 
     // IMPORTANT (fix for hang / out-of-memory on large directories):
@@ -412,9 +406,6 @@ void CommonCmds::ls(const std::string& currentDir, bool showAll, size_t maxShown
                 emit("[DIR] " + base + "\n");
             } else {
                 emit(" " + base + " (" + std::to_string(sz) + "b)\n");
-            }
-            if (Helpers::lastOutput.size() < LASTOUTPUT_CAP) {
-                Helpers::lastOutput.push_back(base);
             }
             shown++;
         }

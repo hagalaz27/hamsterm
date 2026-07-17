@@ -21,6 +21,9 @@ class Helpers {
 
     public:
     static std::string currentDir;
+    // SSIDs from the last `wf s`, used to complete `wf c <ssid>` with Tab.
+    // (Only Wi-Fi needs this: file names are completed by reading the directory
+    // itself, so ls does not fill this in.)
     static std::vector<std::string> lastOutput;
     static const char* ntpServer;
     static std::string tzString;   // POSIX TZ string (e.g. "EET-2EEST,M3.5.0/3,M10.5.0/4"); "UTC0" = UTC
