@@ -19,6 +19,7 @@
 #include "Editor.h"
 #include "Telnet.h"
 #include "Ssh.h"
+#include "Scp.h"
 #include "Helpers.h"
 
 class Terminal {
@@ -71,6 +72,13 @@ private:
     bool sshWaitingForPass = false;
     std::string sshUser, sshHost;
     uint16_t sshPort = 22;
+
+    // scp is a one-shot (non-modal) transfer: like ssh it prompts for a password
+    // first, so the parsed request is stashed here until the password arrives.
+    bool scpWaitingForPass = false;
+    bool scpDownload = true;   // false = upload (local -> remote)
+    std::string scpUser, scpHost, scpRemote, scpLocalAbs;
+    uint16_t scpPort = 22;
 
     // --- User variables (expand as $NAME / ${NAME}) ---
     std::map<std::string, std::string> vars;
@@ -619,7 +627,7 @@ public:
             "cut", "date", "df", "echo", "ed", "edit", "find", "free", "grep",
             "head", "help", "httpd", "led", "ls", "mkdir", "mount", "mv", "nc",
             "net", "ping", "pwd", "read", "reboot", "rm", "rmdir", "set", "sh",
-            "sleep", "sort", "ssh", "sysinfo", "tail", "telnet", "test", "touch",
+            "sleep", "sort", "ssh", "scp", "sysinfo", "tail", "telnet", "test", "touch",
             "tr", "umount", "uniq", "unmount", "unset", "wc", "wf", "wget"
         };
         return names;
@@ -965,19 +973,31 @@ public:
         uint16_t port = 22;
         std::vector<std::string> positional;
         for (size_t i = 0; i < toks.size(); ++i) {
-            if (toks[i] == "-l" && i + 1 < toks.size()) { user = toks[++i]; }
-            else if (toks[i] == "-p" && i + 1 < toks.size()) {
-                long v; if (parse_uint(toks[++i], v) && v >= 1 && v <= 65535) port = (uint16_t)v;
+            if (toks[i] == "-l") {
+                if (i + 1 >= toks.size()) { print("ssh: -l needs a user\n"); Helpers::cmd_status = 1; return; }
+                user = toks[++i];
+            } else if (toks[i] == "-p") {
+                if (i + 1 >= toks.size()) { print("ssh: -p needs a port\n"); Helpers::cmd_status = 1; return; }
+                long v;
+                if (!parse_uint(toks[++i], v) || v < 1 || v > 65535) {
+                    print("ssh: invalid port: " + toks[i] + "\n");
+                    Helpers::cmd_status = 1; return;
+                }
+                port = (uint16_t)v;
             } else positional.push_back(toks[i]);
         }
-        if (positional.empty()) { print("Usage: ssh [user@]host [port]\n"); Helpers::cmd_status = 1; return; }
+        if (positional.empty()) { print(usage_for("ssh")); Helpers::cmd_status = 1; return; }
+        // The port goes in -p, like OpenSSH; a stray second word is a mistake
+        // worth reporting rather than silently ignoring.
+        if (positional.size() > 1) {
+            print("ssh: unexpected argument: " + positional[1] + " (port goes in -p PORT)\n");
+            Helpers::cmd_status = 1; return;
+        }
 
         std::string target = positional[0];
         size_t at = target.find('@');
         if (at != std::string::npos) { user = target.substr(0, at); host = target.substr(at + 1); }
         else host = target;
-        // optional bare port as second positional
-        if (positional.size() >= 2) { long v; if (parse_uint(positional[1], v) && v >= 1 && v <= 65535) port = (uint16_t)v; }
 
         if (host.empty()) { print("ssh: no host\n"); Helpers::cmd_status = 1; return; }
         if (user.empty()) { print("ssh: no user (use user@host or -l user)\n"); Helpers::cmd_status = 1; return; }
@@ -989,6 +1009,76 @@ public:
     }
 
     // Called with the typed password to perform the (blocking) connection.
+    // scp [-p PORT] SOURCE DEST  - download (host:path -> local) or upload
+    // (local -> host:path). Both prompt for the password.
+    void start_scp(const std::string& argstr) {
+        ScpArgs a = scp_parse(split_ws(argstr));
+        if (!a.ok) {
+            print(a.err == "usage" ? usage_for("scp") : a.err + "\n");
+            Helpers::cmd_status = 1;
+            return;
+        }
+        if (WiFi.status() != WL_CONNECTED) {
+            print("Not connected to WiFi\n");
+            Helpers::cmd_status = 1;
+            return;
+        }
+
+        std::string localAbs = Helpers::make_absolute(a.localPath);
+        if (a.download) {
+            // Local is the destination. If it names an existing directory (or
+            // "."), drop the file inside it under its remote basename.
+            File probe = Helpers::fsOpen(localAbs, "r");
+            if (probe && probe.isDirectory()) {
+                probe.close();
+                std::string base = CommonCmds::base_name(a.remotePath);
+                localAbs = (localAbs == "/") ? "/" + base : localAbs + "/" + base;
+            } else if (probe) {
+                probe.close();
+            }
+        } else {
+            // Upload: local is the source; it must exist and be a regular file.
+            File probe = Helpers::fsOpen(localAbs, "r");
+            if (!probe) {
+                print("scp: " + Helpers::clearFilename(a.localPath) + ": no such file\n");
+                Helpers::cmd_status = 1; return;
+            }
+            if (probe.isDirectory()) {
+                probe.close();
+                print("scp: " + Helpers::clearFilename(a.localPath) + ": is a directory\n");
+                Helpers::cmd_status = 1; return;
+            }
+            probe.close();
+        }
+
+        scpDownload = a.download;
+        scpUser = a.user; scpHost = a.host; scpPort = a.port;
+        scpRemote = a.remotePath; scpLocalAbs = localAbs;
+        scpWaitingForPass = true;
+        print("Password: ");
+    }
+
+    void scp_run_with_pass(const std::string& password) {
+        scpWaitingForPass = false;
+        ScpClient scp;
+        LineCallback emit = [this](const std::string& s) { this->print(s); };
+        bool ok;
+        if (scpDownload) {
+            print("\nDownloading " + scpRemote + " ...\n");
+            ok = scp.download(scpHost, scpUser, password, scpPort, scpRemote, scpLocalAbs, emit);
+            if (ok) print("Saved " + Helpers::clearFilename(scpLocalAbs) + " (" +
+                          std::to_string(scp.transferred()) + " bytes)\n");
+        } else {
+            print("\nUploading " + Helpers::clearFilename(scpLocalAbs) + " ...\n");
+            ok = scp.upload(scpHost, scpUser, password, scpPort, scpLocalAbs, scpRemote, emit);
+            if (ok) print("Uploaded " + scpRemote + " (" +
+                          std::to_string(scp.transferred()) + " bytes)\n");
+        }
+        if (!ok) { print(scp.error() + "\n"); Helpers::cmd_status = 1; }
+        else Helpers::cmd_status = 0;
+        print_prompt();
+    }
+
     void ssh_connect_with_pass(const std::string& password) {
         sshWaitingForPass = false;
         print("\nConnecting to " + sshHost + "...\n");
@@ -1789,7 +1879,8 @@ public:
     static std::string usage_for(const std::string& c) {
         if (c == "cat")    return "Usage: cat <file>...\n";
         if (c == "find")   return "Usage: find [path] <name|pattern>\n";
-        if (c == "ssh")    return "Usage: ssh [user@]host [port]\n";
+        if (c == "ssh")    return "Usage: ssh [-p PORT] [-l USER] [user@]host\n";
+        if (c == "scp")    return "Usage: scp [-p PORT] user@host:remote <local>  (download)  or  scp [-p PORT] <local> user@host:remote  (upload)\n";
         if (c == "telnet") return "Usage: telnet <host> [port]\n";
         if (c == "nc")     return "Usage: nc <host> <port>\n";
         if (c == "edit" || c == "ed") return "Usage: edit <file>\n";
@@ -1846,6 +1937,12 @@ public:
             // The entered line is the SSH password (consumed, not run/stored).
             ssh_connect_with_pass(cmd);
             return; // ssh_connect_with_pass prints the prompt on failure
+        }
+
+        if (scpWaitingForPass) {
+            // The entered line is the scp password (consumed, not run/stored).
+            scp_run_with_pass(cmd);
+            return; // scp_run_with_pass prints the prompt itself
         }
 
         // Record the command in the recall history (no consecutive duplicates).
@@ -2077,6 +2174,11 @@ public:
                 // ssh [user@]host [port]   (password auth, prompts for password)
                 start_ssh(cmd.substr(4));
                 return; // prompt/handoff managed inside start_ssh
+            }
+            else if (cmd.rfind("scp ", 0) == 0) {
+                // scp [-p PORT] [user@]host:remote local   (download; prompts pw)
+                start_scp(cmd.substr(4));
+                return; // prompt/handoff managed inside start_scp
             }
             else if (cmd.rfind("telnet ", 0) == 0) {
                 // telnet <host> [port]   (default port 23)
@@ -2599,7 +2701,7 @@ public:
         // Print the next prompt unless a full-screen mode took over (editor,
         // telnet, ssh) or we are waiting for a password to be typed.
         if (!editorActive && !telnetActive && !sshActive &&
-            !sshWaitingForPass && !WiFiCmds::waitingForPass) {
+            !sshWaitingForPass && !scpWaitingForPass && !WiFiCmds::waitingForPass) {
             print_prompt();
         }
     }
