@@ -605,10 +605,19 @@ void TextCmds::sort(const std::string& args, const std::string& input,
         return;
     }
 
-    // stable_sort keeps the original order of lines with equal keys.
+    // GNU sort: when the keys compare equal, fall back to comparing the whole
+    // lines (the "last-resort" comparison) so equal-key lines still get a
+    // definite order instead of the input order. This tie-break is a RAW byte
+    // comparison - it ignores -n and -f (so under -f, "A" still sorts before
+    // "a"). -r reverses it along with everything else. (Real sort disables the
+    // last-resort under -s/--stable, which hamsTerm does not expose.)
     std::stable_sort(lines.begin(), lines.end(),
                      [&o](const std::string& a, const std::string& b) {
                          int c = key_cmp(a, b, o);
+                         if (c == 0) {
+                             if (a < b) c = -1;
+                             else if (a > b) c = 1;
+                         }
                          return o.reverse ? (c > 0) : (c < 0);
                      });
 

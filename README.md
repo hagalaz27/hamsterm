@@ -1,13 +1,32 @@
-# hamsTerm
+<p align="center">
+  <img src="assets/logo.png" alt="hamsTerm" width="160">
+</p>
+
+<h1 align="center">hamsTerm</h1>
+
+<p align="center">A Linux-like terminal firmware for the M5Stack Cardputer.</p>
 
 A Linux-like terminal firmware for the **M5Stack Cardputer** (ESP32-S3). It gives
-the handheld a real shell: a filesystem on internal flash and microSD, Wi-Fi and
-network tools, a full-screen text editor, interactive telnet/nc and SSH clients,
-shell-style globbing, and user variables - all driven from the device keyboard.
+the handheld a real shell: a filesystem on internal flash and microSD, a text
+pipeline (grep/cut/tr/sort), Wi-Fi and network tools, `tar` archives, `scp`
+file transfer, a full-screen text editor, interactive telnet/nc and SSH clients,
+shell-style globbing, scripting and user variables - all driven from the device
+keyboard.
 
 ## Features
 - **Files:** `ls`, `cd`, `cat`, `cp -r`, `mv`, `rm -r`, `mkdir`, `touch`,
   `head`, `tail`, `find`, hidden (dot) files
+- **Text processing:** `grep`, `cut`, `tr`, `wc`, `sort`, `uniq` - Unix-style
+  filters that read a pipe **or** a file. `grep <pat> [file]` keeps matching
+  lines; `cut -f/-c [-d]` pulls out fields or characters; `tr [-d] [-s]`
+  translates/deletes/squeezes characters (ranges `a-z`, escapes `\n`); `wc
+  [-lwc]` counts lines/words/bytes; `sort [-r] [-n] [-u] [-f] [-k N] [-t C]`
+  sorts (in RAM, up to 2000 lines); `uniq [-c] [-d] [-u] [-i]` collapses adjacent
+  duplicates. Chain them: `net s | grep 192 | cut -f1 | sort -u`.
+- **Archives:** `tar -c|-x|-t -f <archive> [path...]` packs and unpacks files and
+  folders in the classic **ustar** format (no compression, streamed block by
+  block). Interoperates with desktop `tar` both ways. Handy for sending a whole
+  folder in one `scp`: `tar -cf docs.tar /sd/docs`.
 - **Globbing:** `*` and `?` expand in every command (e.g. `rm *.log`, `cat *.md`)
 - **Variables:** `set NAME value` / `NAME=value`, expand as `$NAME` / `${NAME}`,
   persisted across reboots in `/.environment`
@@ -39,9 +58,12 @@ shell-style globbing, and user variables - all driven from the device keyboard.
 - **Interactive input:** `read [-p prompt] name...` pauses for a typed line and
   stores it (multiple names split the input by words, the last gets the rest) -
   the basis for prompts, menus and confirmations in scripts. Ctrl+C cancels.
-- **Pipes, redirection & logic:** `>`, `>>`, `| grep`, and `&&` / `||` for
-  conditional chains (`cmd1 && cmd2` runs the second only if the first succeeded;
-  `cmd1 || cmd2` only if it failed) - works at the prompt and in scripts
+- **Pipes, redirection & logic:** `>`, `>>`, and a general pipeline `a | b | c`
+  that streams each command's output into the next (any command on the left; the
+  text filters above on the right) - e.g. `ls | sort | head -5`. Plus `&&` / `||`
+  for conditional chains (`cmd1 && cmd2` runs the second only if the first
+  succeeded; `cmd1 || cmd2` only if it failed) - all working at the prompt and in
+  scripts.
 - **Storage:** mount/unmount microSD at `/sd`, `df`
 - **Wi-Fi & network:** scan, connect, `ping`, local network + port scan
   (`net s p <host> [ports]`, defaults to the top 1000; open ports are labelled
@@ -57,9 +79,16 @@ shell-style globbing, and user variables - all driven from the device keyboard.
 - **Access point:** host a Wi-Fi AP with `ap -s ssid [-p pass] start` (open or WPA2)
 - **telnet / nc:** interactive client with local line editing, ANSI handling
   and screen scrollback
-- **SSH:** password-based SSH client (LibSSH-ESP32) for a remote shell
+- **SSH:** password-based SSH client (LibSSH-ESP32) for a remote shell -
+  `ssh [-p PORT] [-l USER] [user@]host`
+- **scp:** copy files over SSH in both directions, streamed in chunks -
+  `scp [-p PORT] user@host:remote local` to download,
+  `scp [-p PORT] local user@host:remote` to upload. Pair it with `tar` to move a
+  whole folder in one shot.
 - **Editor:** `edit` / `ed` - full-screen editor with cursor keys and Ctrl shortcuts
-- **System:** `help`, `sysinfo`, `free`, `df`, `battery`, `reboot`
+- **System:** `help`, `sysinfo`, `free`, `df`, `battery`, `clear`, `sleep <sec>`,
+  `reboot`. The clock syncs over NTP; set your zone with the `TZ` variable in
+  POSIX form (e.g. `TZ=EET-2EEST,M3.5.0/3,M10.5.0/4`) so `date` shows local time.
 - **Web server / file manager:** `httpd start [path]` serves a built-in file
   manager on port 80, reachable on both the SoftAP IP and the Wi-Fi IP. From a
   browser you can browse, download, **upload**, **edit text files**, **rename**,
@@ -92,7 +121,7 @@ The Cardputer's arrow keys are `Fn` + `;` `.` `,` `/` (up / down / left / right)
 | Up / Down (`Fn`+`;` / `Fn`+`.`) | Command history: previous / next |
 | Left / Right (`Fn`+`,` / `Fn`+`/`) | Move the edit cursor within the line |
 | `Ctrl`+`;` / `Ctrl`+`.` | Scroll the output up / down |
-| `Tab` | Autocomplete a name from the last `ls` |
+| `Tab` | Autocomplete: a command name on the first word, otherwise a file or directory read live from the filesystem (after `wf c`, a network from the last `wf s`). Tab again cycles the matches. |
 
 In the **editor**, the arrows move the cursor and `Ctrl`+`S` / `Ctrl`+`X` / `Ctrl`+`Q`
 save / save&exit / quit. In **telnet / SSH** sessions, `Ctrl`+`;` / `Ctrl`+`.` scroll

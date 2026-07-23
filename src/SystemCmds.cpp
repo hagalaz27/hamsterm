@@ -29,6 +29,7 @@ void SystemCmds::help(LineCallback emit) {
     emit("       head tail find\n");
     emit("       touch mkdir rmdir\n");
     emit("       rm[-r] cp[-r] mv\n");
+    emit("       tar -c|-x|-t -f <archive> <path>\n");
     emit("       echo date clear\n");
     emit("Edit:  edit/ed <file>\n");
     emit("Disk:  mount umount df\n");

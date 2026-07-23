@@ -20,6 +20,7 @@
 #include "Telnet.h"
 #include "Ssh.h"
 #include "Scp.h"
+#include "Tar.h"
 #include "Helpers.h"
 
 class Terminal {
@@ -570,7 +571,7 @@ public:
 
         if (scroll_offset == 0 && !liveCommand) {
             M5Cardputer.Display.print(prompt.c_str());
-            M5Cardputer.Display.print(command.c_str());
+            M5Cardputer.Display.print(shown_command().c_str());
             // Derive the input's first row by counting back from the END cursor
             // (same method as redraw_input_inplace). Capturing it BEFORE printing
             // is wrong when the prompt+command printing scrolls the screen.
@@ -614,7 +615,7 @@ public:
     static bool takes_paths(const std::string& firstWord) {
         static const std::vector<std::string> p = {
             "[", "cat", "cd", "cp", "cut", "ed", "edit", "find", "grep", "head",
-            "ls", "mkdir", "mv", "rm", "rmdir", "sh", "sort", "tail", "test",
+            "ls", "mkdir", "mv", "rm", "rmdir", "sh", "sort", "tail", "tar", "test",
             "touch", "uniq", "wc"
         };
         for (const auto& c : p) if (c == firstWord) return true;
@@ -627,7 +628,7 @@ public:
             "cut", "date", "df", "echo", "ed", "edit", "find", "free", "grep",
             "head", "help", "httpd", "led", "ls", "mkdir", "mount", "mv", "nc",
             "net", "ping", "pwd", "read", "reboot", "rm", "rmdir", "set", "sh",
-            "sleep", "sort", "ssh", "scp", "sysinfo", "tail", "telnet", "test", "touch",
+            "sleep", "sort", "ssh", "scp", "sysinfo", "tail", "tar", "telnet", "test", "touch",
             "tr", "umount", "uniq", "unmount", "unset", "wc", "wf", "wget"
         };
         return names;
@@ -720,7 +721,10 @@ public:
                 bool wantPath = takes_paths(first) ||
                                 prev == ">" || prev == ">>" ||
                                 prev == "-o" ||
-                                (first == "httpd" && prev == "start");
+                                (first == "httpd" && prev == "start") ||
+                                // scp: complete the local side, never the remote
+                                // [user@]host:path operand.
+                                (first == "scp" && !scp_is_remote(token));
                 if (!wantPath) return; // nothing sensible to complete here
                 collect_path_matches(token, tabPrefix, tabMatches);
             }
@@ -753,6 +757,43 @@ public:
         command += suffix;
         cursorPos = command.length();
         render_input(oldLen);
+    }
+
+    // True while the shell is reading a password (wf c / ssh / scp). The typed
+    // characters are still stored in `command`; only their on-screen rendering is
+    // masked so someone looking over your shoulder can't read the password.
+    bool in_password_mode() const {
+        return sshWaitingForPass || scpWaitingForPass || WiFiCmds::waitingForPass;
+    }
+    // What to actually draw for the current input: the real text, or a run of
+    // asterisks of the SAME length in password mode (same length keeps all the
+    // cursor and wrapping math identical).
+    std::string shown_command() const {
+        if (in_password_mode()) return std::string(command.size(), '*');
+        // `wf c <ssid> -p <password>` types the secret straight into the command
+        // line, so hide that part while it is being typed - masking only the
+        // scrollback would still leave it readable on screen.
+        size_t pp = inline_pass_pos(command);
+        if (pp == std::string::npos) return command;
+        std::string out = command.substr(0, pp + 3);   // keep "... -p"
+        size_t i = pp + 3;
+        while (i < command.size() && (command[i] == ' ' || command[i] == '\t'))
+            out += command[i++];                       // keep the separator blanks
+        out.append(command.size() - i, '*');           // same length: cursor math intact
+        return out;
+    }
+
+    // Start of the " -p" that introduces an inline password in a `wf c` line, or
+    // npos when there is none. Mirrors WiFiCmds::wifi_connect's own parsing
+    // (everything after " -p" is the password), so what we hide is exactly what
+    // is treated as a secret.
+    static size_t inline_pass_pos(const std::string& cmd) {
+        if (cmd.rfind("wf c ", 0) != 0) return std::string::npos;
+        size_t p = cmd.find(" -p");
+        if (p == std::string::npos) return std::string::npos;
+        std::string rest = cmd.substr(p + 3);
+        Helpers::trim(rest);
+        return rest.empty() ? std::string::npos : p; // bare -p: nothing to hide
     }
 
     // Redraw "prompt + command" in place, clearing exactly the display rows the
@@ -790,7 +831,7 @@ public:
         M5Cardputer.Display.fillRect(0, startY, M5Cardputer.Display.width(), rows * lineH, BLACK);
         M5Cardputer.Display.setCursor(0, startY);
         M5Cardputer.Display.print(prompt.c_str());
-        M5Cardputer.Display.print(command.c_str());
+        M5Cardputer.Display.print(shown_command().c_str());
         inputStartY = startY;
     }
 
@@ -1923,8 +1964,20 @@ public:
         // including "> file"). Skipped while a script is running: the script's
         // commands must not fill the scrollback or the recall history - only
         // their output (and, in -v mode, the echo from run_script) is kept.
+        // In password mode the line is masked here too, otherwise scrolling the
+        // screen back up would reveal a password that was hidden while typing.
         if (scriptDepth == 0 && chainDepth == 0) {
-            add_to_history(prompt + cmd);
+            if (in_password_mode()) {
+                add_to_history(prompt + std::string(cmd.size(), '*'));
+            } else {
+                // `wf c <ssid> -p <password>` carries the password in the line
+                // itself, so the value is masked before it reaches the scrollback.
+                size_t pp = inline_pass_pos(cmd);
+                if (pp != std::string::npos)
+                    add_to_history(prompt + cmd.substr(0, pp) + " -p ****");
+                else
+                    add_to_history(prompt + cmd);
+            }
         }
 
         if (WiFiCmds::waitingForPass) {
@@ -1946,10 +1999,14 @@ public:
         }
 
         // Record the command in the recall history (no consecutive duplicates).
-        // Passwords (handled above) never reach here. Script commands are not
-        // recorded - only the `sh ...` line the user typed is.
-        if (scriptDepth == 0 && chainDepth == 0 && (cmdHistory.empty() || cmdHistory.back() != cmd)) {
-            cmdHistory.push_back(cmd);
+        // Interactive passwords (handled above) never reach here. An inline
+        // `-p <password>` would, so it is cut off: pressing Up then Enter reruns
+        // `wf c <ssid>`, which asks for the password instead of replaying it.
+        // Script commands are not recorded - only the `sh ...` line the user typed.
+        size_t pp = inline_pass_pos(cmd);
+        std::string recalled = (pp == std::string::npos) ? cmd : cmd.substr(0, pp);
+        if (scriptDepth == 0 && chainDepth == 0 && (cmdHistory.empty() || cmdHistory.back() != recalled)) {
+            cmdHistory.push_back(recalled);
             while ((int)cmdHistory.size() > max_cmd_history) {
                 cmdHistory.erase(cmdHistory.begin());
             }
@@ -2179,6 +2236,9 @@ public:
                 // scp [-p PORT] [user@]host:remote local   (download; prompts pw)
                 start_scp(cmd.substr(4));
                 return; // prompt/handoff managed inside start_scp
+            }
+            else if (cmd == "tar" || cmd.rfind("tar ", 0) == 0) {
+                TarCmds::run(cmd == "tar" ? std::string() : cmd.substr(4), emit);
             }
             else if (cmd.rfind("telnet ", 0) == 0) {
                 // telnet <host> [port]   (default port 23)
